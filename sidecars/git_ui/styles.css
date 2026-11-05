@@ -106,59 +106,12 @@ body {
   flex-shrink: 0;
   background: var(--background, #18181b);
   border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.22));
-  padding: 10px 12px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.header-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.title-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.title-icon {
-  color: var(--primary, #3b82f6);
-  flex-shrink: 0;
-}
-
-.app-title {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.conv-badge {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--secondary, rgba(128, 128, 128, 0.15));
-  color: var(--muted-foreground, #a1a1aa);
-}
-
-.conv-badge.fork {
-  background: var(--sc-info-bg);
-  color: var(--sc-info-fg);
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.auto-toggle,
 .amend-toggle {
   display: inline-flex;
   align-items: center;
@@ -168,39 +121,6 @@ body {
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-}
-
-.auto-toggle input {
-  display: none;
-}
-
-.live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--muted-foreground, #71717a);
-}
-
-.auto-toggle input:checked + .live-dot {
-  background: #22c55e;
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
-}
-
-.icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 5px;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-  background: var(--card, rgba(255, 255, 255, 0.03));
-  color: var(--foreground, inherit);
-  cursor: pointer;
-}
-
-.icon-btn:hover {
-  background: var(--secondary, rgba(128, 128, 128, 0.18));
 }
 
 .badge-count {
@@ -233,18 +153,6 @@ body {
   gap: 5px;
   font-weight: 600;
   color: var(--foreground, #e4e4e7);
-}
-
-.root-mcp-hint {
-  font-size: 10px;
-  opacity: 0.85;
-}
-
-.root-mcp-hint code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  background: var(--secondary, rgba(128, 128, 128, 0.18));
-  padding: 1px 4px;
-  border-radius: 3px;
 }
 
 .root-list {

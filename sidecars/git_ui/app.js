@@ -38,7 +38,6 @@
     gapExpansions: new Map(), // key: `${filePath}::${gapIdx}` -> { fromStart: number, fromEnd: number }
     fileLinesCache: new Map(), // key: `${wtPath}::${mode}::${commit}::${filePath}::${add}:${del}` -> { totalLines, lines }
     fileFilter: '',
-    live: true,
     loadingDiff: false,
   };
 
@@ -248,22 +247,8 @@
   }
 
   function renderHeaderAndRoots() {
-    $('count-roots').textContent = String(state.roots.length);
-
-    const forkBadge = $('fork-badge');
-    if (forkBadge) {
-      if (state.isForkedSession) {
-        const parentShort = state.parentConversationId
-          ? state.parentConversationId.slice(0, 8)
-          : 'parent';
-        forkBadge.textContent = `fork:${parentShort}`;
-        forkBadge.title = state.parentConversationId
-          ? `Forked from conversation ${state.parentConversationId}`
-          : 'Forked session';
-        forkBadge.classList.remove('hidden');
-      } else {
-        forkBadge.classList.add('hidden');
-      }
+    if ($('count-roots')) {
+      $('count-roots').textContent = String(state.roots.length);
     }
 
     const listEl = $('root-list');
@@ -1351,15 +1336,6 @@
     await loadDiffForSelected({ silent: false });
   });
 
-  $('btn-refresh')?.addEventListener('click', () => {
-    showToast('Refreshing Source Control…');
-    refreshAll({ silent: false });
-  });
-
-  $('chk-live')?.addEventListener('change', (e) => {
-    state.live = e.target.checked;
-  });
-
   $('file-filter')?.addEventListener('input', (e) => {
     state.fileFilter = e.target.value || '';
     const wt = getActiveRoot();
@@ -1380,25 +1356,43 @@
     if (wt) renderDiffFiles(wt);
   });
 
-  // Initialize
-  state.conversationId = resolveConversationId();
-  if (state.conversationId) {
-    const badge = $('conv-badge');
-    if (badge) {
-      badge.textContent = state.conversationId.slice(0, 8);
-      badge.title = `Session ID: ${state.conversationId}`;
-      badge.classList.remove('hidden');
-    }
-  }
-
-  refreshAll({ silent: false });
-
-  setInterval(() => {
-    if (!state.live || document.hidden || state.committing) return;
+  let lastRefreshAt = 0;
+  async function refreshIfActive({ silent = true, minIntervalMs = 0 } = {}) {
+    if (state.committing || state.discardPrompt) return;
+    const now = Date.now();
+    if (minIntervalMs > 0 && now - lastRefreshAt < minIntervalMs) return;
+    lastRefreshAt = now;
     const nextConv = resolveConversationId();
     if (nextConv && nextConv !== state.conversationId) {
       state.conversationId = nextConv;
     }
-    refreshAll({ silent: true });
-  }, POLL_INTERVAL_MS);
+    await refreshAll({ silent });
+  }
+
+  async function init() {
+    state.conversationId = resolveConversationId();
+    lastRefreshAt = Date.now();
+    await refreshAll({ silent: false });
+
+    // Refresh automatically when the pane becomes visible, focused, or interacted with
+    window.addEventListener('focus', () => {
+      refreshIfActive({ silent: true, minIntervalMs: 1000 });
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        refreshIfActive({ silent: true, minIntervalMs: 1000 });
+      }
+    });
+    document.addEventListener('mouseenter', () => {
+      refreshIfActive({ silent: true, minIntervalMs: 2000 });
+    });
+
+    setInterval(() => {
+      if (!document.hidden && !state.committing && !state.discardPrompt) {
+        refreshIfActive({ silent: true });
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  init();
 })();

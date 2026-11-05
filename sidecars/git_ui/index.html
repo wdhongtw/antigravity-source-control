@@ -10,44 +10,12 @@
 <body>
   <div class="app">
     <header class="header">
-      <div class="header-top">
-        <div class="title-group">
-          <svg class="title-icon" width="16" height="16" viewBox="0 0 128 128" fill="none" aria-hidden="true">
-            <path d="M28 24V104" stroke="#f97316" stroke-width="12.5" stroke-linecap="round"/>
-            <path d="M28 44C46 44 62 56 62 76V92" stroke="#22d3ee" stroke-width="11.5" stroke-linecap="round"/>
-            <circle cx="28" cy="24" r="12.5" fill="#0f172a" stroke="#fb923c" stroke-width="5.5"/>
-            <circle cx="28" cy="104" r="12.5" fill="#0f172a" stroke="#f97316" stroke-width="5.5"/>
-            <circle cx="62" cy="94" r="12.5" fill="#083344" stroke="#22d3ee" stroke-width="5.5"/>
-            <rect x="76" y="24" width="40" height="18" rx="9" fill="#10b981"/>
-            <rect x="76" y="52" width="32" height="18" rx="9" fill="#f43f5e"/>
-          </svg>
-          <h1 class="app-title">Source Control</h1>
-          <span id="conv-badge" class="conv-badge hidden" title="Active Conversation ID"></span>
-          <span id="fork-badge" class="conv-badge fork hidden" title="Forked from parent conversation"></span>
-        </div>
-        <div class="header-actions">
-          <label class="auto-toggle" title="Auto-refresh every 4 seconds">
-            <input type="checkbox" id="chk-live" checked>
-            <span class="live-dot" aria-hidden="true"></span>
-            <span>Live</span>
-          </label>
-          <button id="btn-refresh" type="button" class="icon-btn" title="Refresh repositories, status &amp; diffs now">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.66M13.5 2.5v2.25h-2.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
       <!-- Top Clickable Repository / Worktree Rows (File Explorer Registration Pattern) -->
       <div class="root-selector-box">
         <div class="root-selector-header">
           <span class="root-selector-label">
             Repositories &amp; Worktrees
             <span id="count-roots" class="badge-count">0</span>
-          </span>
-          <span class="root-mcp-hint" title="Use git_register / git_unregister / git_list MCP tools to manage session repositories">
-            MCP: <code>git_*</code>
           </span>
         </div>
         <div id="root-list" class="root-list" role="listbox" aria-label="Tracked Git repositories and worktrees"></div>
