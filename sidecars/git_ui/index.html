@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Source Control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-top">
+        <div class="title-group">
+          <svg class="title-icon" width="16" height="16" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+            <path d="M28 24V104" stroke="#f97316" stroke-width="12.5" stroke-linecap="round"/>
+            <path d="M28 44C46 44 62 56 62 76V92" stroke="#22d3ee" stroke-width="11.5" stroke-linecap="round"/>
+            <circle cx="28" cy="24" r="12.5" fill="#0f172a" stroke="#fb923c" stroke-width="5.5"/>
+            <circle cx="28" cy="104" r="12.5" fill="#0f172a" stroke="#f97316" stroke-width="5.5"/>
+            <circle cx="62" cy="94" r="12.5" fill="#083344" stroke="#22d3ee" stroke-width="5.5"/>
+            <rect x="76" y="24" width="40" height="18" rx="9" fill="#10b981"/>
+            <rect x="76" y="52" width="32" height="18" rx="9" fill="#f43f5e"/>
+          </svg>
+          <h1 class="app-title">Source Control</h1>
+          <span id="conv-badge" class="conv-badge hidden" title="Active Conversation ID"></span>
+          <span id="fork-badge" class="conv-badge fork hidden" title="Forked from parent conversation"></span>
+        </div>
+        <div class="header-actions">
+          <label class="auto-toggle" title="Auto-refresh every 4 seconds">
+            <input type="checkbox" id="chk-live" checked>
+            <span class="live-dot" aria-hidden="true"></span>
+            <span>Live</span>
+          </label>
+          <button id="btn-refresh" type="button" class="icon-btn" title="Refresh repositories, status &amp; diffs now">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.66M13.5 2.5v2.25h-2.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Top Clickable Repository / Worktree Rows (File Explorer Registration Pattern) -->
+      <div class="root-selector-box">
+        <div class="root-selector-header">
+          <span class="root-selector-label">
+            Repositories &amp; Worktrees
+            <span id="count-roots" class="badge-count">0</span>
+          </span>
+          <span class="root-mcp-hint" title="Use git_register / git_unregister / git_list MCP tools to manage session repositories">
+            MCP: <code>git_*</code>
+          </span>
+        </div>
+        <div id="root-list" class="root-list" role="listbox" aria-label="Tracked Git repositories and worktrees"></div>
+      </div>
+    </header>
+
+    <main id="vcs-body" class="vcs-body">
+      <div id="empty-root-state" class="empty-state">
+        Loading session Git repositories…
+      </div>
+
+      <div id="repo-workspace" class="repo-workspace hidden">
+        <!-- IDE Source Control Changes & Commit Section -->
+        <section class="scm-section" aria-label="Source Control Changes and Commit">
+          <div class="scm-commit-box">
+            <textarea
+              id="commit-input"
+              class="commit-input"
+              rows="2"
+              placeholder="Commit message (Ctrl+Enter to commit)"
+            ></textarea>
+            <div class="commit-controls">
+              <label class="amend-toggle" title="Amend the previous commit (git commit --amend)">
+                <input type="checkbox" id="chk-amend">
+                <span>Amend</span>
+              </label>
+              <div class="commit-btns">
+                <button id="btn-commit" type="button" class="ghost-btn primary">Commit</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Inline Confirmation Bar for Discard Actions -->
+          <div id="mutation-bar" class="mutation-bar hidden" role="region" aria-label="Discard confirmation prompt"></div>
+
+          <!-- Staged & Working Tree Changes Tree -->
+          <div id="changes-lists" class="changes-lists"></div>
+        </section>
+
+        <!-- Unified Diff & Commit Stack Inspector Section -->
+        <section class="diff-section" aria-label="Unified Diff and Commit Inspector">
+          <div class="diff-header">
+            <div class="diff-mode-bar">
+              <div class="segmented diff-modes" role="tablist" aria-label="Diff mode">
+                <button type="button" class="seg-btn active" data-mode="working" title="All uncommitted working tree, staged, and untracked changes">Working Tree</button>
+                <button type="button" class="seg-btn" data-mode="staged" title="Staged index changes only (git diff --cached)">Staged</button>
+                <button type="button" class="seg-btn" data-mode="unstaged" title="Unstaged working tree and untracked changes">Unstaged</button>
+                <button type="button" class="seg-btn" data-mode="all" title="Committed + uncommitted changes compared to base branch">All vs Base</button>
+                <button type="button" class="seg-btn" data-mode="branch" title="Committed changes on this branch or recent commit history">Commits</button>
+              </div>
+            </div>
+
+            <div id="commits-box" class="commits-box hidden"></div>
+
+            <div class="file-toolbar">
+              <input id="file-filter" type="search" class="file-search" placeholder="Filter changed files…" autocomplete="off">
+              <span id="diff-summary-stats" class="diff-summary-stats"></span>
+              <div class="ctx-control" title="Surrounding diff context lines (git diff -U)">
+                <button id="btn-ctx-shrink" type="button" class="ghost-btn sm" title="Shrink surrounding context lines">&#8722;</button>
+                <span id="ctx-label" class="ctx-label">3 ctx</span>
+                <button id="btn-ctx-expand" type="button" class="ghost-btn sm" title="Expand surrounding context lines">+</button>
+              </div>
+              <button id="btn-expand-all" type="button" class="ghost-btn sm">Expand All</button>
+              <button id="btn-collapse-all" type="button" class="ghost-btn sm">Collapse All</button>
+            </div>
+          </div>
+
+          <div id="diff-container" class="diff-container"></div>
+        </section>
+      </div>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

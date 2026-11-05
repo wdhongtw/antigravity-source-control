@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "git": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/mcp/git_mcp.mjs"
+      ],
+      "tools": {
+        "git_register": {
+          "eager": true
+        },
+        "git_unregister": {
+          "eager": true
+        },
+        "git_list": {
+          "eager": true
+        }
+      }
+    }
+  }
+}

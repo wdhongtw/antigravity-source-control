@@ -1,0 +1,23 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Source Control",
+  "description": "IDE-style Git source control, worktree inspector, staging and commit workflow, and live unified diff viewer",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Source Control",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Source Control"
+      },
+      {
+        "path": "/fullscreen",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_FULL_PANE",
+        "title": "Source Control (Full)"
+      }
+    ]
+  }
+}
