@@ -14,12 +14,21 @@
       <div class="root-selector-box">
         <div class="root-selector-header">
           <span class="root-selector-label">
-            Repositories &amp; Worktrees
-            <span id="count-roots" class="badge-count">0</span>
+            <svg class="switcher-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="4" cy="3.5" r="1.75" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="4" cy="12.5" r="1.75" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="12" cy="8.5" r="1.75" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M4 5.25v5.5M4 6c3.5 0 8 0.5 8 0.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span>Switch Repository / Worktree</span>
           </span>
+          <span id="count-roots" class="badge-count">0</span>
         </div>
         <div id="root-list" class="root-list" role="listbox" aria-label="Tracked Git repositories and worktrees"></div>
       </div>
+
+      <!-- Active Repository Context Bridge Bar -->
+      <div id="active-repo-bar" class="active-repo-bar hidden" role="status" aria-live="polite"></div>
     </header>
 
     <main id="vcs-body" class="vcs-body">

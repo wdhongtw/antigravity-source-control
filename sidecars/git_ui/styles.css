@@ -101,15 +101,15 @@ body {
   background: color-mix(in srgb, var(--muted-foreground, #71717a) 62%, transparent);
 }
 
-/* Header */
+/* Header: Top-Level Repository & Worktree Switcher Deck */
 .header {
   flex-shrink: 0;
-  background: var(--background, #18181b);
-  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.22));
-  padding: 8px 12px;
+  background: color-mix(in srgb, var(--secondary, #25252c) 55%, var(--background, #141417));
+  border-bottom: 2px solid color-mix(in srgb, var(--primary, #3b82f6) 42%, var(--border, rgba(128, 128, 128, 0.3)));
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.22);
+  z-index: 10;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
 
 .amend-toggle {
@@ -125,17 +125,20 @@ body {
 
 .badge-count {
   font-size: 10px;
-  padding: 0 5px;
+  font-weight: 600;
+  padding: 1px 6px;
   border-radius: 999px;
-  background: var(--secondary, rgba(128, 128, 128, 0.2));
-  color: var(--foreground, inherit);
+  background: var(--card, rgba(128, 128, 128, 0.2));
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  color: var(--muted-foreground, #a1a1aa);
 }
 
-/* Clickable Root Repository / Worktree Rows */
+/* Clickable Root Repository / Worktree Switcher Well */
 .root-selector-box {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
+  padding: 8px 10px;
 }
 
 .root-selector-header {
@@ -143,26 +146,38 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 11px;
-  color: var(--muted-foreground, #a1a1aa);
+  padding: 0 2px;
 }
 
 .root-selector-label {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-weight: 600;
-  color: var(--foreground, #e4e4e7);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.switcher-icon {
+  color: var(--primary, #3b82f6);
+  flex-shrink: 0;
 }
 
 .root-list {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  max-height: 175px;
+  gap: 4px;
+  max-height: 176px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
+  padding: 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--background, #141417) 82%, #000000 18%);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.24));
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);
 }
 
 .root-row {
@@ -174,11 +189,12 @@ body {
   text-align: left;
   padding: 6px 10px 6px 12px;
   border-radius: 6px;
-  border: 1px solid var(--card-border, var(--border, rgba(128, 128, 128, 0.22)));
-  background: var(--card, rgba(255, 255, 255, 0.03));
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--card, #1c1c21) 65%, transparent);
   color: var(--foreground, #e4e4e7);
+  opacity: 0.78;
   cursor: pointer;
-  transition: border-color 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease;
+  transition: opacity 0.12s ease, border-color 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .root-row::before {
@@ -187,25 +203,91 @@ body {
   left: 0;
   top: 5px;
   bottom: 5px;
-  width: 3px;
+  width: 3.5px;
   border-radius: 0 3px 3px 0;
   background: transparent;
   transition: background-color 0.12s ease;
 }
 
 .root-row:hover {
-  border-color: color-mix(in srgb, var(--primary, #3b82f6) 65%, var(--border, transparent));
-  background: var(--secondary, rgba(128, 128, 128, 0.1));
+  opacity: 0.96;
+  border-color: color-mix(in srgb, var(--primary, #3b82f6) 55%, var(--border, transparent));
+  background: var(--card, rgba(255, 255, 255, 0.06));
 }
 
 .root-row.active {
+  opacity: 1;
   border-color: var(--primary, #3b82f6);
-  background: color-mix(in srgb, var(--primary, #3b82f6) 12%, var(--card, #1f1f23));
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+  background: color-mix(in srgb, var(--primary, #3b82f6) 15%, var(--card, #1f1f23));
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
 }
 
 .root-row.active::before {
   background: var(--primary, #3b82f6);
+}
+
+/* Active Repository Context Bridge Bar */
+.active-repo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  background: color-mix(in srgb, var(--primary, #3b82f6) 11%, var(--card, #1c1c21));
+  border-top: 1px solid color-mix(in srgb, var(--primary, #3b82f6) 28%, var(--border, rgba(128, 128, 128, 0.2)));
+  min-width: 0;
+}
+
+.active-repo-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.active-repo-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--primary, #3b82f6);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.active-repo-name {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--foreground, #e4e4e7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-repo-branch {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--card, #1c1c21);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.24));
+  color: var(--foreground, #e4e4e7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 165px;
+  flex-shrink: 0;
+}
+
+.active-repo-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--muted-foreground, #a1a1aa);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
 }
 
 .root-row-top {
@@ -346,6 +428,11 @@ body {
 .source-pill.src-worktree {
   background: var(--sc-mod-bg);
   color: var(--sc-mod-fg);
+}
+
+.source-pill.src-active {
+  background: var(--primary, #3b82f6);
+  color: var(--primary-foreground, #ffffff);
 }
 
 .status-pill {

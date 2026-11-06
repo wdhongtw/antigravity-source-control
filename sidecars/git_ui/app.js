@@ -248,10 +248,11 @@
 
   function renderHeaderAndRoots() {
     if ($('count-roots')) {
-      $('count-roots').textContent = String(state.roots.length);
+      $('count-roots').textContent = `${state.roots.length} tracked`;
     }
 
     const listEl = $('root-list');
+    const activeBarEl = $('active-repo-bar');
     const emptyStateEl = $('empty-root-state');
     const workspaceEl = $('repo-workspace');
 
@@ -260,6 +261,7 @@
         listEl,
         '<div class="empty-state">No associated Git repositories in this session</div>'
       );
+      activeBarEl?.classList.add('hidden');
       emptyStateEl.classList.remove('hidden');
       setHtmlIfChanged(
         emptyStateEl,
@@ -287,6 +289,11 @@
             : '';
 
         const rightBadges = [];
+        if (isSelected) {
+          rightBadges.push(
+            '<span class="source-pill src-active">Active</span>'
+          );
+        }
         if (r.inheritedFromFork) {
           rightBadges.push(
             '<span class="status-pill inherited" title="Inherited from parent conversation before session fork">Inherited</span>'
@@ -371,12 +378,14 @@
 
     const activeRoot = getActiveRoot();
     if (!activeRoot) {
+      activeBarEl?.classList.add('hidden');
       emptyStateEl.classList.remove('hidden');
       workspaceEl.classList.add('hidden');
       return;
     }
 
     if (!activeRoot.existsOnDisk || !activeRoot.isGitRepo) {
+      activeBarEl?.classList.add('hidden');
       emptyStateEl.classList.remove('hidden');
       setHtmlIfChanged(
         emptyStateEl,
@@ -385,6 +394,26 @@
       );
       workspaceEl.classList.add('hidden');
       return;
+    }
+
+    if (activeBarEl) {
+      const kindTag = activeRoot.isMainWorktree ? 'Active Repo' : 'Active Worktree';
+      const baseSuffix =
+        activeRoot.baseRef &&
+        activeRoot.baseRef !== 'HEAD' &&
+        activeRoot.baseRef !== activeRoot.branch
+          ? ` → ${activeRoot.baseRef}`
+          : '';
+      activeBarEl.classList.remove('hidden');
+      setHtmlIfChanged(
+        activeBarEl,
+        `<div class="active-repo-left">
+          <span class="active-repo-tag">${esc(kindTag)}</span>
+          <span class="active-repo-name">${esc(activeRoot.displayName || activeRoot.name)}</span>
+          <span class="active-repo-branch">${esc(activeRoot.branch + baseSuffix)}</span>
+        </div>
+        <code class="active-repo-path" title="${esc(activeRoot.path)}">${esc(activeRoot.displayPath)}</code>`
+      );
     }
 
     emptyStateEl.classList.add('hidden');
