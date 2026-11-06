@@ -39,6 +39,15 @@
     fileLinesCache: new Map(), // key: `${wtPath}::${mode}::${commit}::${filePath}::${add}:${del}` -> { totalLines, lines }
     fileFilter: '',
     loadingDiff: false,
+    // Inline diff review commenting state:
+    // renderedFileRows: Map<filePath, Array<{ rowIdx, type, oldNo, newNo, text, hunkHeader }>>
+    renderedFileRows: new Map(),
+    // activeCommentDraft: { filePath, anchorRowIdx, startRowIdx, endRowIdx, text, quotedText } | null
+    activeCommentDraft: null,
+    // stagedComments: Array<{ id, rootPath, filePath, customUri, logicalUri, diffMode, commitSha, startRowIdx, endRowIdx, rangeLabel, modeLabel, snippet, beforeText, afterText, startLine, endLine, text }>
+    stagedComments: [],
+    // Drag selection state on line numbers
+    draggingCommentRange: null, // { filePath, anchorRowIdx } | null
   };
 
   function esc(str) {
@@ -592,39 +601,439 @@
     setHtmlIfChanged(listsEl, groupsHtml.join(''));
   }
 
-  function renderDiffRow(ln, extraCls = '') {
+  function syncCommentDraftTextFromDom() {
+    if (!state.activeCommentDraft) return;
+    const textarea = $('diff-comment-input');
+    if (textarea) {
+      state.activeCommentDraft.text = textarea.value;
+    }
+  }
+
+  function focusCommentDraftTextarea() {
+    requestAnimationFrame(() => {
+      const textarea = $('diff-comment-input');
+      if (textarea) {
+        textarea.focus({ preventScroll: true });
+        const len = textarea.value.length;
+        textarea.setSelectionRange(len, len);
+      }
+    });
+  }
+
+  function formatCurrentDiffModeLabel() {
+    if (state.selectedCommit) {
+      return `Commit ${state.selectedCommit.slice(0, 7)}`;
+    }
+    switch (state.diffMode) {
+      case 'working':
+        return 'Working Tree';
+      case 'staged':
+        return 'Staged';
+      case 'unstaged':
+        return 'Unstaged';
+      case 'all':
+        return 'All vs Base';
+      case 'branch':
+        return 'Branch Commits';
+      default:
+        return state.diffMode;
+    }
+  }
+
+  function formatDiffRowPrefix(type) {
+    return type === 'add' ? '+' : type === 'del' ? '-' : ' ';
+  }
+
+  function sanitizeUriSegment(str) {
+    return String(str || 'default').replace(/[^a-zA-Z0-9._-]+/g, '-');
+  }
+
+  /**
+   * Builds logical Git diff target components (`repoSlug`, `revSlug`, `cleanRelPath`).
+   */
+  function buildLogicalDiffParts(wt, filePath, diffMode = state.diffMode, commitSha = state.selectedCommit) {
+    const repoSlug = sanitizeUriSegment(wt?.displayName || wt?.name || 'repo');
+    let revSlug = 'working-tree';
+    if (commitSha) {
+      revSlug = `commit-${sanitizeUriSegment(commitSha.slice(0, 12))}`;
+    } else if (diffMode === 'staged') {
+      revSlug = 'staged-index';
+    } else if (diffMode === 'unstaged') {
+      revSlug = 'unstaged-worktree';
+    } else if (diffMode === 'working') {
+      revSlug = 'working-tree';
+    } else if (diffMode === 'all') {
+      revSlug = `all-vs-${sanitizeUriSegment(wt?.baseRef || 'HEAD')}`;
+    } else if (diffMode === 'branch') {
+      revSlug = `branch-${sanitizeUriSegment(wt?.baseRef || 'main')}..${sanitizeUriSegment(wt?.branch || 'HEAD')}`;
+    }
+    const cleanRelPath = String(filePath || '').replace(/^\/+/, '');
+    return { repoSlug, revSlug, cleanRelPath };
+  }
+
+  /**
+   * Builds the canonical logical Git diff URI using the custom `git-diff://` scheme:
+   * `git-diff://<repo>.local/<rev>/<filePath>`
+   */
+  function buildCustomDiffUri(wt, filePath, diffMode = state.diffMode, commitSha = state.selectedCommit) {
+    const { repoSlug, revSlug, cleanRelPath } = buildLogicalDiffParts(
+      wt,
+      filePath,
+      diffMode,
+      commitSha
+    );
+    return `git-diff://${repoSlug}.local/${revSlug}/${cleanRelPath}`;
+  }
+
+  /**
+   * Builds the host `add-artifact-comment` wrapper URI (`file:///git-diff/<repo>.local/<rev>/<filePath>`),
+   * since host `toFileUri` / `toLocalFileUri` enforces a `file:///` scheme prefix on native composer pills.
+   */
+  function buildLogicalDiffUri(wt, filePath, diffMode = state.diffMode, commitSha = state.selectedCommit) {
+    const { repoSlug, revSlug, cleanRelPath } = buildLogicalDiffParts(
+      wt,
+      filePath,
+      diffMode,
+      commitSha
+    );
+    return `file:///git-diff/${repoSlug}.local/${revSlug}/${cleanRelPath}`;
+  }
+
+  function buildGitDiffProvenanceHeader(wt, filePath, hunkHeader = '', diffMode = state.diffMode, commitSha = state.selectedCommit) {
+    const customUri = buildCustomDiffUri(wt, filePath, diffMode, commitSha);
+    let gitCmd = `git diff HEAD -- ${filePath}`;
+    if (commitSha) {
+      gitCmd = `git show ${commitSha} -- ${filePath}`;
+    } else if (diffMode === 'staged') {
+      gitCmd = `git diff --cached -- ${filePath}`;
+    } else if (diffMode === 'unstaged') {
+      gitCmd = `git diff -- ${filePath}`;
+    } else if (diffMode === 'all') {
+      gitCmd = `git diff ${wt.baseRef || 'HEAD'} -- ${filePath}`;
+    } else if (diffMode === 'branch') {
+      gitCmd = `git diff ${wt.baseRef || 'HEAD'}...HEAD -- ${filePath}`;
+    }
+    const hunkPart = hunkHeader ? ` · ${hunkHeader}` : '';
+    return `[Logical Git diff · URI: ${customUri} · repo: ${wt.path} · \`${gitCmd}\`${hunkPart}]`;
+  }
+
+  function computeCommentSelectionMeta(filePath, startRowIdx, endRowIdx, quotedText = '', wt = getActiveRoot()) {
+    const rows = state.renderedFileRows.get(filePath) || [];
+    const provenanceHeader = wt
+      ? buildGitDiffProvenanceHeader(wt, filePath, '')
+      : '';
+    if (startRowIdx < 0 || rows.length === 0) {
+      const fallbackContent =
+        quotedText.trim() || `[File diff review on ${filePath}]`;
+      return {
+        rangeLabel: 'File-level diff comment',
+        startLine: 1,
+        endLine: 1,
+        content: fallbackContent,
+        beforeText: provenanceHeader || undefined,
+        afterText: undefined,
+      };
+    }
+
+    const lo = Math.max(0, Math.min(startRowIdx, endRowIdx));
+    const hi = Math.min(rows.length - 1, Math.max(startRowIdx, endRowIdx));
+    const selectedRows = rows.slice(lo, hi + 1);
+    const hunkHeader = selectedRows[0]?.hunkHeader || '';
+    const fullProvenance = wt
+      ? buildGitDiffProvenanceHeader(wt, filePath, hunkHeader)
+      : '';
+
+    const newNos = selectedRows
+      .map((r) => r.newNo)
+      .filter((n) => Number.isInteger(n) && n >= 1);
+    const oldNos = selectedRows
+      .map((r) => r.oldNo)
+      .filter((n) => Number.isInteger(n) && n >= 1);
+
+    let startLine = 1;
+    let endLine = 1;
+    if (newNos.length > 0) {
+      startLine = Math.min(...newNos);
+      endLine = Math.max(...newNos);
+    } else if (oldNos.length > 0) {
+      startLine = Math.min(...oldNos);
+      endLine = Math.max(...oldNos);
+    }
+
+    const rangeParts = [];
+    if (oldNos.length > 0) {
+      const oMin = Math.min(...oldNos);
+      const oMax = Math.max(...oldNos);
+      rangeParts.push(oMin === oMax ? `-L${oMin}` : `-L${oMin}–${oMax}`);
+    }
+    if (newNos.length > 0) {
+      const nMin = Math.min(...newNos);
+      const nMax = Math.max(...newNos);
+      rangeParts.push(nMin === nMax ? `+L${nMin}` : `+L${nMin}–${nMax}`);
+    }
+    const rangeLabel = rangeParts.join(' / ') || `L${startLine}`;
+
+    const diffSnippet = selectedRows
+      .map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`)
+      .join('\n');
+    const content =
+      quotedText && quotedText.trim() && selectedRows.length === 1
+        ? `${formatDiffRowPrefix(selectedRows[0].type)}${quotedText}`
+        : diffSnippet || `[Lines ${rangeLabel}]`;
+
+    const beforeRows = rows.slice(Math.max(0, lo - 2), lo);
+    const afterRows = rows.slice(hi + 1, Math.min(rows.length, hi + 3));
+
+    const beforeLines = [];
+    if (fullProvenance) {
+      beforeLines.push(fullProvenance);
+    }
+    if (beforeRows.length > 0) {
+      beforeLines.push(
+        beforeRows.map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`).join('\n')
+      );
+    }
+    const beforeText = beforeLines.length > 0 ? beforeLines.join('\n') : undefined;
+    const afterText =
+      afterRows.length > 0
+        ? afterRows.map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`).join('\n')
+        : undefined;
+
+    return {
+      rangeLabel,
+      startLine,
+      endLine: Math.max(startLine, endLine),
+      content,
+      beforeText,
+      afterText,
+    };
+  }
+
+  function postAddArtifactCommentToHost(payload) {
+    if (window.sidecar?.ui?.addArtifactComment) {
+      window.sidecar.ui.addArtifactComment(payload);
+      return true;
+    }
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(
+        {
+          type: 'add-artifact-comment',
+          payload,
+        },
+        '*'
+      );
+      return true;
+    }
+    return false;
+  }
+
+  function submitActiveCommentDraft() {
+    const wt = getActiveRoot();
+    const draft = state.activeCommentDraft;
+    if (!wt || !draft) return;
+
+    syncCommentDraftTextFromDom();
+    const commentText = (draft.text || '').trim();
+    if (!commentText) {
+      showToast('Please enter a review comment');
+      focusCommentDraftTextarea();
+      return;
+    }
+
+    const meta = computeCommentSelectionMeta(
+      draft.filePath,
+      draft.startRowIdx,
+      draft.endRowIdx,
+      draft.quotedText || '',
+      wt
+    );
+    const modeLabel = formatCurrentDiffModeLabel();
+    const customUri = buildCustomDiffUri(
+      wt,
+      draft.filePath,
+      state.diffMode,
+      state.selectedCommit
+    );
+    const hostUri = buildLogicalDiffUri(
+      wt,
+      draft.filePath,
+      state.diffMode,
+      state.selectedCommit
+    );
+    const pageTitle = `${customUri} (${modeLabel} diff · ${meta.rangeLabel})`;
+
+    const payload = {
+      uri: hostUri,
+      pageTitle,
+      comment: commentText,
+      selection: {
+        content: meta.content,
+        ...(meta.beforeText ? { beforeText: meta.beforeText } : {}),
+        ...(meta.afterText ? { afterText: meta.afterText } : {}),
+        startLine: meta.startLine,
+        endLine: meta.endLine,
+      },
+    };
+
+    postAddArtifactCommentToHost(payload);
+
+    state.stagedComments.push({
+      id: `sc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      rootPath: wt.path,
+      filePath: draft.filePath,
+      customUri,
+      logicalUri: hostUri,
+      diffMode: state.diffMode,
+      commitSha: state.selectedCommit,
+      startRowIdx: draft.startRowIdx,
+      endRowIdx: draft.endRowIdx,
+      rangeLabel: meta.rangeLabel,
+      modeLabel,
+      snippet: meta.content,
+      beforeText: meta.beforeText,
+      afterText: meta.afterText,
+      startLine: meta.startLine,
+      endLine: meta.endLine,
+      text: commentText,
+    });
+
+    state.activeCommentDraft = null;
+    hideSelectionQuotePill();
+    renderDiffFiles(wt);
+    showToast(`Added comment on ${customUri} (${meta.rangeLabel}) to Chat`);
+  }
+
+  function renderInlineCommentDraftCardHtml(filePath) {
+    const draft = state.activeCommentDraft;
+    if (!draft || draft.filePath !== filePath) return '';
+    const wt = getActiveRoot();
+    const meta = computeCommentSelectionMeta(
+      filePath,
+      draft.startRowIdx,
+      draft.endRowIdx,
+      draft.quotedText || '',
+      wt
+    );
+    const modeLabel = formatCurrentDiffModeLabel();
+    const customUri = wt
+      ? buildCustomDiffUri(wt, filePath, state.diffMode, state.selectedCommit)
+      : `git-diff://repo.local/${filePath}`;
+    const snippetLines = (meta.content || '').split('\n');
+    const previewSnippet =
+      snippetLines.length > 4
+        ? `${snippetLines.slice(0, 4).join('\n')}\n… (${snippetLines.length - 4} more line${snippetLines.length - 4 === 1 ? '' : 's'})`
+        : meta.content;
+
+    return `
+      <div class="diff-comment-box" data-comment-draft-box="1">
+        <div class="diff-comment-header">
+          <div class="diff-comment-header-left">
+            <span class="diff-comment-badge">Review Comment</span>
+            <span class="diff-comment-target"><code>${esc(customUri)}</code> · <strong>${esc(meta.rangeLabel)}</strong></span>
+            <span class="diff-comment-mode-pill">${esc(modeLabel)}</span>
+          </div>
+          <span class="diff-comment-hint">Shift+Click or drag line numbers to select range</span>
+        </div>
+        <pre class="diff-comment-quote">${esc(previewSnippet)}</pre>
+        <textarea
+          id="diff-comment-input"
+          class="diff-comment-textarea"
+          rows="2"
+          placeholder="Ask a question or request changes on these diff lines… (Ctrl+Enter to add to Chat, Esc to cancel)"
+        >${esc(draft.text || '')}</textarea>
+        <div class="diff-comment-actions">
+          <span class="diff-comment-subhint">Stages into host Chat input box as a native review comment pill</span>
+          <div class="diff-comment-btns">
+            <button type="button" class="ghost-btn sm" data-action="cancel-diff-comment">Cancel</button>
+            <button type="button" class="ghost-btn sm primary" data-action="submit-diff-comment">Add to Chat</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderStagedCommentCardHtml(c) {
+    const uriLabel = c.customUri || `git-diff://repo.local/${c.filePath}`;
+    return `
+      <div class="diff-staged-comment" data-staged-comment-id="${esc(c.id)}">
+        <div class="diff-staged-comment-top">
+          <div class="diff-staged-comment-meta">
+            <span class="diff-staged-pill">Staged in Chat</span>
+            <button type="button" class="diff-staged-uri-chip" data-action="copy-path" data-path="${esc(uriLabel)}" title="Click to copy ${esc(uriLabel)}"><code>${esc(uriLabel)}</code></button>
+            <span class="diff-staged-range">${esc(c.rangeLabel)} · ${esc(c.modeLabel)}</span>
+          </div>
+          <div class="diff-staged-actions">
+            <button type="button" class="row-btn" data-action="restage-diff-comment" data-comment-id="${esc(c.id)}" title="Re-send this comment to the host Chat input pill">Re-add to Chat</button>
+            <button type="button" class="row-btn danger" data-action="dismiss-staged-comment" data-comment-id="${esc(c.id)}" title="Dismiss inline marker from diff view">Dismiss</button>
+          </div>
+        </div>
+        <div class="diff-staged-comment-body">${esc(c.text)}</div>
+      </div>`;
+  }
+
+  function renderDiffRow(filePath, ln, rowIdx, extraCls = '') {
+    const draft = state.activeCommentDraft;
+    const isSelectedForComment =
+      draft &&
+      draft.filePath === filePath &&
+      draft.startRowIdx >= 0 &&
+      rowIdx >= Math.min(draft.startRowIdx, draft.endRowIdx) &&
+      rowIdx <= Math.max(draft.startRowIdx, draft.endRowIdx);
+
     const cls =
       ln.type === 'add'
         ? 'line-add'
         : ln.type === 'del'
         ? 'line-del'
         : `line-ctx${extraCls ? ` ${extraCls}` : ''}`;
-    const prefix = ln.type === 'add' ? '+' : ln.type === 'del' ? '-' : ' ';
-    return `<tr class="diff-line ${cls}">
-      <td class="line-num">${ln.oldNo ?? ''}</td>
-      <td class="line-num">${ln.newNo ?? ''}</td>
-      <td class="line-prefix">${prefix}</td>
-      <td class="line-code">${esc(ln.text)}</td>
-    </tr>`;
+    const selectedCls = isSelectedForComment ? ' selected-for-comment' : '';
+    const prefix = formatDiffRowPrefix(ln.type);
+
+    const rowHtml = `<tr class="diff-line ${cls}${selectedCls}" data-diff-file="${esc(filePath)}" data-row-idx="${rowIdx}" data-old-no="${ln.oldNo ?? ''}" data-new-no="${ln.newNo ?? ''}" data-line-type="${esc(ln.type)}"><td class="line-num line-num-old" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range"><button type="button" class="line-comment-btn" data-comment-gutter="${rowIdx}" tabindex="-1" title="Comment on this diff line (Shift+Click for range)">+</button><span>${ln.oldNo ?? ''}</span></td><td class="line-num line-num-new" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range">${ln.newNo ?? ''}</td><td class="line-prefix">${prefix}</td><td class="line-code">${esc(ln.text)}</td></tr>`;
+
+    const wt = getActiveRoot();
+    const stagedAtRow = state.stagedComments.filter(
+      (c) =>
+        wt &&
+        c.rootPath === wt.path &&
+        c.filePath === filePath &&
+        Math.max(c.startRowIdx, c.endRowIdx) === rowIdx
+    );
+    const stagedRowsHtml = stagedAtRow
+      .map(
+        (c) =>
+          `<tr class="diff-inline-widget-row"><td colspan="4">${renderStagedCommentCardHtml(c)}</td></tr>`
+      )
+      .join('');
+
+    const showDraftHere =
+      draft &&
+      draft.filePath === filePath &&
+      draft.startRowIdx >= 0 &&
+      Math.max(draft.startRowIdx, draft.endRowIdx) === rowIdx;
+    const draftRowHtml = showDraftHere
+      ? `<tr class="diff-inline-widget-row"><td colspan="4">${renderInlineCommentDraftCardHtml(filePath)}</td></tr>`
+      : '';
+
+    return `${rowHtml}${stagedRowsHtml}${draftRowHtml}`;
   }
 
-  function renderExpandedRange(lines, newStart, oldStart, count) {
+  function renderExpandedRange(filePath, fileRows, lines, newStart, oldStart, count) {
     if (!lines || count <= 0) return '';
     const rows = [];
     for (let i = 0; i < count; i++) {
       const newNo = newStart + i;
       const oldNo = oldStart + i;
       if (newNo < 1 || newNo > lines.length) break;
+      const rowObj = {
+        rowIdx: fileRows.length,
+        type: 'ctx',
+        oldNo,
+        newNo,
+        text: lines[newNo - 1] ?? '',
+      };
+      fileRows.push(rowObj);
       rows.push(
-        renderDiffRow(
-          {
-            type: 'ctx',
-            oldNo,
-            newNo,
-            text: lines[newNo - 1] ?? '',
-          },
-          'line-ctx-expanded'
-        )
+        renderDiffRow(filePath, rowObj, rowObj.rowIdx, 'line-ctx-expanded')
       );
     }
     if (rows.length === 0) return '';
@@ -666,7 +1075,7 @@
     return { gapNewStart, gapOldStart, gapSize };
   }
 
-  function renderGapSection(wt, f, gapIdx) {
+  function renderGapSection(wt, f, gapIdx, fileRows) {
     if (
       f.isBinary ||
       f.status === 'D' ||
@@ -704,11 +1113,20 @@
 
     const topHtml =
       topCount > 0 && fileInfo?.lines
-        ? renderExpandedRange(fileInfo.lines, gapNewStart, gapOldStart, topCount)
+        ? renderExpandedRange(
+            f.path,
+            fileRows,
+            fileInfo.lines,
+            gapNewStart,
+            gapOldStart,
+            topCount
+          )
         : '';
     const botHtml =
       botCount > 0 && fileInfo?.lines
         ? renderExpandedRange(
+            f.path,
+            fileRows,
             fileInfo.lines,
             gapNewStart + gapSize - botCount,
             gapOldStart + gapSize - botCount,
@@ -808,6 +1226,7 @@
   }
 
   function renderDiffFiles(wt) {
+    syncCommentDraftTextFromDom();
     const container = $('diff-container');
     const summaryEl = $('diff-summary-stats');
 
@@ -833,6 +1252,8 @@
       return;
     }
 
+    state.renderedFileRows.clear();
+
     const cardsHtml = files
       .map((f) => {
         const collapsed = state.collapsedFiles.has(f.path);
@@ -841,9 +1262,21 @@
         const statusLabel = f.status === 'U' ? 'U' : f.status;
         const pathLabel = f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
 
+        const fileRows = [];
+        state.renderedFileRows.set(f.path, fileRows);
+
         const stateBadges = [];
         const cardActions = [];
         const ds = f.dirtyState;
+
+        const fileStagedCommentsCount = state.stagedComments.filter(
+          (c) => c.rootPath === wt.path && c.filePath === f.path
+        ).length;
+        if (fileStagedCommentsCount > 0) {
+          stateBadges.push(
+            `<span class="status-pill comment-count-pill" title="${fileStagedCommentsCount} comment(s) staged in Chat">${fileStagedCommentsCount} 💬</span>`
+          );
+        }
 
         if (!state.selectedCommit && state.diffMode !== 'branch' && ds) {
           if (ds.staged) {
@@ -875,25 +1308,56 @@
 
         let bodyHtml = '';
         if (!collapsed) {
+          const fileLevelStagedHtml = state.stagedComments
+            .filter(
+              (c) =>
+                c.rootPath === wt.path &&
+                c.filePath === f.path &&
+                c.startRowIdx < 0
+            )
+            .map((c) => renderStagedCommentCardHtml(c))
+            .join('');
+          const fileLevelDraftHtml =
+            state.activeCommentDraft &&
+            state.activeCommentDraft.filePath === f.path &&
+            state.activeCommentDraft.startRowIdx < 0
+              ? renderInlineCommentDraftCardHtml(f.path)
+              : '';
+          const fileTopWidgets =
+            fileLevelStagedHtml || fileLevelDraftHtml
+              ? `<div class="file-level-comment-wrap">${fileLevelStagedHtml}${fileLevelDraftHtml}</div>`
+              : '';
+
           if (f.isBinary) {
-            bodyHtml =
-              '<div class="file-hunks"><div class="empty-state">Binary or large file not shown</div></div>';
+            bodyHtml = `<div class="file-hunks">${fileTopWidgets}<div class="empty-state">Binary or large file not shown</div></div>`;
           } else if (f.hunks.length === 0) {
-            bodyHtml =
-              '<div class="file-hunks"><div class="empty-state">Empty file or mode-only change</div></div>';
+            bodyHtml = `<div class="file-hunks">${fileTopWidgets}<div class="empty-state">Empty file or mode-only change</div></div>`;
           } else {
-            const parts = [];
+            const parts = [fileTopWidgets];
             for (let idx = 0; idx < f.hunks.length; idx++) {
-              parts.push(renderGapSection(wt, f, idx));
+              parts.push(renderGapSection(wt, f, idx, fileRows));
               const h = f.hunks[idx];
-              const rowsHtml = h.lines.map((ln) => renderDiffRow(ln)).join('');
+              const rowsHtml = h.lines
+                .map((ln) => {
+                  const rowObj = {
+                    rowIdx: fileRows.length,
+                    type: ln.type,
+                    oldNo: ln.oldNo ?? null,
+                    newNo: ln.newNo ?? null,
+                    text: ln.text ?? '',
+                    hunkHeader: h.header,
+                  };
+                  fileRows.push(rowObj);
+                  return renderDiffRow(f.path, rowObj, rowObj.rowIdx);
+                })
+                .join('');
               parts.push(`
                 <div class="hunk-block">
                   <div class="hunk-header">${esc(h.header)}</div>
                   <table class="diff-table"><tbody>${rowsHtml}</tbody></table>
                 </div>`);
             }
-            parts.push(renderGapSection(wt, f, f.hunks.length));
+            parts.push(renderGapSection(wt, f, f.hunks.length, fileRows));
             bodyHtml = `<div class="file-hunks">${parts.join('')}</div>`;
           }
         }
@@ -911,6 +1375,7 @@
                 <span class="stat-add">+${f.additions}</span>
                 <span class="stat-del">-${f.deletions}</span>
                 ${cardActions.join('')}
+                <button type="button" class="row-btn comment-btn" data-action="comment-file" data-file="${esc(f.path)}" title="Add a review comment on this file diff to Chat">💬 Comment</button>
                 <button type="button" class="row-btn" data-action="copy-path" data-path="${esc(f.path)}" title="Copy relative path">Copy</button>
                 <button type="button" class="row-btn" data-action="open-file" data-path="${esc(fullFilePath)}" title="Open in native File Preview">Open</button>
               </div>
@@ -964,6 +1429,41 @@
     }
   }
 
+  let pendingSelectionQuote = null; // { filePath, startRowIdx, endRowIdx, quotedText }
+
+  function hideSelectionQuotePill() {
+    pendingSelectionQuote = null;
+    $('selection-quote-pill')?.classList.add('hidden');
+  }
+
+  function openDiffCommentDraft(filePath, rowIdx, { extendRange = false, quotedText = '' } = {}) {
+    const wt = getActiveRoot();
+    if (!wt || !filePath) return;
+    syncCommentDraftTextFromDom();
+
+    const prev = state.activeCommentDraft;
+    if (extendRange && prev && prev.filePath === filePath && prev.anchorRowIdx >= 0 && rowIdx >= 0) {
+      prev.startRowIdx = Math.min(prev.anchorRowIdx, rowIdx);
+      prev.endRowIdx = Math.max(prev.anchorRowIdx, rowIdx);
+      if (quotedText) prev.quotedText = quotedText;
+    } else {
+      const preservedText =
+        prev && prev.filePath === filePath ? prev.text || '' : '';
+      state.activeCommentDraft = {
+        filePath,
+        anchorRowIdx: rowIdx,
+        startRowIdx: rowIdx,
+        endRowIdx: rowIdx,
+        text: preservedText,
+        quotedText: quotedText || '',
+      };
+    }
+
+    state.collapsedFiles.delete(filePath);
+    renderDiffFiles(wt);
+    focusCommentDraftTextarea();
+  }
+
   async function selectRootRepository(nextRootPath) {
     if (!nextRootPath) return;
     const changed = state.selectedRootPath !== nextRootPath;
@@ -972,6 +1472,8 @@
       state.selectedChangeFile = '';
       state.selectedCommit = '';
       state.discardPrompt = null;
+      state.activeCommentDraft = null;
+      hideSelectionQuotePill();
       state.collapsedFiles.clear();
       state.gapExpansions.clear();
       state.diffData = null;
@@ -1015,6 +1517,8 @@
         state.selectedChangeFile = '';
         state.selectedCommit = '';
         state.discardPrompt = null;
+        state.activeCommentDraft = null;
+        hideSelectionQuotePill();
         state.collapsedFiles.clear();
         state.gapExpansions.clear();
       }
@@ -1114,8 +1618,165 @@
     }
   }
 
+  // Line Gutter Drag Selection for Multi-Line Comment Ranges
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const gutterEl = e.target.closest('[data-line-gutter], [data-comment-gutter]');
+    if (!gutterEl) return;
+    const rowTr = gutterEl.closest('tr.diff-line');
+    if (!rowTr) return;
+    const filePath = rowTr.dataset.diffFile;
+    const rowIdx = Number(rowTr.dataset.rowIdx);
+    if (!filePath || !Number.isInteger(rowIdx)) return;
+
+    e.preventDefault();
+    hideSelectionQuotePill();
+
+    if (
+      e.shiftKey &&
+      state.activeCommentDraft &&
+      state.activeCommentDraft.filePath === filePath &&
+      state.activeCommentDraft.anchorRowIdx >= 0
+    ) {
+      openDiffCommentDraft(filePath, rowIdx, { extendRange: true });
+      state.draggingCommentRange = {
+        filePath,
+        anchorRowIdx: state.activeCommentDraft.anchorRowIdx,
+      };
+      return;
+    }
+
+    state.draggingCommentRange = { filePath, anchorRowIdx: rowIdx };
+    openDiffCommentDraft(filePath, rowIdx, { extendRange: false });
+  });
+
+  document.addEventListener('mouseover', (e) => {
+    const drag = state.draggingCommentRange;
+    if (!drag) return;
+    const rowTr = e.target.closest('tr.diff-line');
+    if (!rowTr || rowTr.dataset.diffFile !== drag.filePath) return;
+    const rowIdx = Number(rowTr.dataset.rowIdx);
+    if (!Number.isInteger(rowIdx)) return;
+    if (
+      state.activeCommentDraft &&
+      state.activeCommentDraft.filePath === drag.filePath
+    ) {
+      const nextStart = Math.min(drag.anchorRowIdx, rowIdx);
+      const nextEnd = Math.max(drag.anchorRowIdx, rowIdx);
+      if (
+        state.activeCommentDraft.startRowIdx !== nextStart ||
+        state.activeCommentDraft.endRowIdx !== nextEnd
+      ) {
+        syncCommentDraftTextFromDom();
+        state.activeCommentDraft.startRowIdx = nextStart;
+        state.activeCommentDraft.endRowIdx = nextEnd;
+        const wt = getActiveRoot();
+        if (wt) renderDiffFiles(wt);
+      }
+    }
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (state.draggingCommentRange) {
+      state.draggingCommentRange = null;
+      focusCommentDraftTextarea();
+      return;
+    }
+
+    // Detect text selection inside `.diff-table` to offer floating "Comment on Selection" pill
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        hideSelectionQuotePill();
+        return;
+      }
+      const selectedText = sel.toString();
+      if (!selectedText.trim()) {
+        hideSelectionQuotePill();
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const startNode =
+        range.startContainer.nodeType === 1
+          ? range.startContainer
+          : range.startContainer.parentElement;
+      const endNode =
+        range.endContainer.nodeType === 1
+          ? range.endContainer
+          : range.endContainer.parentElement;
+      const startTr = startNode?.closest?.('tr.diff-line');
+      const endTr = endNode?.closest?.('tr.diff-line');
+      if (!startTr || !endTr) {
+        hideSelectionQuotePill();
+        return;
+      }
+      const filePath = startTr.dataset.diffFile;
+      if (!filePath || endTr.dataset.diffFile !== filePath) {
+        hideSelectionQuotePill();
+        return;
+      }
+      const r1 = Number(startTr.dataset.rowIdx);
+      const r2 = Number(endTr.dataset.rowIdx);
+      if (!Number.isInteger(r1) || !Number.isInteger(r2)) {
+        hideSelectionQuotePill();
+        return;
+      }
+
+      const rect = range.getBoundingClientRect();
+      const pill = $('selection-quote-pill');
+      if (!pill || (rect.width === 0 && rect.height === 0)) return;
+
+      pendingSelectionQuote = {
+        filePath,
+        startRowIdx: Math.min(r1, r2),
+        endRowIdx: Math.max(r1, r2),
+        quotedText: selectedText.trim(),
+      };
+
+      const top = Math.max(8, rect.top - 32);
+      const left = Math.min(
+        window.innerWidth - 175,
+        Math.max(8, rect.left + rect.width / 2 - 75)
+      );
+      pill.style.top = `${top}px`;
+      pill.style.left = `${left}px`;
+      pill.classList.remove('hidden');
+    }, 10);
+  });
+
+  $('selection-quote-pill')?.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!pendingSelectionQuote) return;
+    const { filePath, startRowIdx, endRowIdx, quotedText } =
+      pendingSelectionQuote;
+    const wt = getActiveRoot();
+    if (!wt) return;
+    syncCommentDraftTextFromDom();
+    const preservedText =
+      state.activeCommentDraft && state.activeCommentDraft.filePath === filePath
+        ? state.activeCommentDraft.text || ''
+        : '';
+    state.activeCommentDraft = {
+      filePath,
+      anchorRowIdx: startRowIdx,
+      startRowIdx,
+      endRowIdx,
+      text: preservedText,
+      quotedText,
+    };
+    window.getSelection()?.removeAllRanges();
+    hideSelectionQuotePill();
+    renderDiffFiles(wt);
+    focusCommentDraftTextarea();
+  });
+
   // Event Delegation
   document.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-line-gutter], [data-comment-gutter]')) {
+      e.stopPropagation();
+      return;
+    }
     if (e.target.closest('#btn-discard-confirm')) {
       await executeDiscardPrompt();
       return;
@@ -1131,6 +1792,68 @@
       e.stopPropagation();
       const action = actionBtn.dataset.action;
 
+      if (action === 'comment-file') {
+        const filePath = actionBtn.dataset.file || '';
+        if (!filePath) return;
+        const rows = state.renderedFileRows.get(filePath) || [];
+        const targetRowIdx = rows.length > 0 ? 0 : -1;
+        openDiffCommentDraft(filePath, targetRowIdx, { extendRange: false });
+        return;
+      }
+      if (action === 'submit-diff-comment') {
+        submitActiveCommentDraft();
+        return;
+      }
+      if (action === 'cancel-diff-comment') {
+        state.activeCommentDraft = null;
+        const wt = getActiveRoot();
+        if (wt) renderDiffFiles(wt);
+        return;
+      }
+      if (action === 'dismiss-staged-comment') {
+        const id = actionBtn.dataset.commentId || '';
+        state.stagedComments = state.stagedComments.filter((c) => c.id !== id);
+        const wt = getActiveRoot();
+        if (wt) renderDiffFiles(wt);
+        return;
+      }
+      if (action === 'restage-diff-comment') {
+        const id = actionBtn.dataset.commentId || '';
+        const found = state.stagedComments.find((c) => c.id === id);
+        const wt = getActiveRoot();
+        if (found && wt) {
+          const uri =
+            found.logicalUri ||
+            buildLogicalDiffUri(
+              wt,
+              found.filePath,
+              found.diffMode,
+              found.commitSha
+            );
+          const customUri =
+            found.customUri ||
+            buildCustomDiffUri(
+              wt,
+              found.filePath,
+              found.diffMode,
+              found.commitSha
+            );
+          postAddArtifactCommentToHost({
+            uri,
+            pageTitle: `${customUri} (${found.modeLabel} diff · ${found.rangeLabel})`,
+            comment: found.text,
+            selection: {
+              content: found.snippet,
+              ...(found.beforeText ? { beforeText: found.beforeText } : {}),
+              ...(found.afterText ? { afterText: found.afterText } : {}),
+              startLine: found.startLine ?? 1,
+              endLine: found.endLine ?? 1,
+            },
+          });
+          showToast(`Re-added ${customUri} to Chat`);
+        }
+        return;
+      }
       if (action === 'copy-root-path' || action === 'copy-path') {
         const p = actionBtn.dataset.path || '';
         if (p) {
@@ -1289,6 +2012,8 @@
     if (modeBtn) {
       state.diffMode = modeBtn.dataset.mode;
       state.selectedCommit = '';
+      state.activeCommentDraft = null;
+      hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
       return;
@@ -1297,6 +2022,8 @@
     const clearCommitBtn = e.target.closest('[data-clear-commit]');
     if (clearCommitBtn) {
       state.selectedCommit = '';
+      state.activeCommentDraft = null;
+      hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
       return;
@@ -1306,6 +2033,8 @@
     if (commitRow) {
       const sha = commitRow.dataset.commitSha;
       state.selectedCommit = state.selectedCommit === sha ? '' : sha;
+      state.activeCommentDraft = null;
+      hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
       return;
@@ -1319,6 +2048,29 @@
       const wt = getActiveRoot();
       if (wt) renderDiffFiles(wt);
       return;
+    }
+  });
+
+  document.addEventListener('input', (e) => {
+    if (e.target && e.target.id === 'diff-comment-input' && state.activeCommentDraft) {
+      state.activeCommentDraft.text = e.target.value;
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target && e.target.id === 'diff-comment-input') {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        submitActiveCommentDraft();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        state.activeCommentDraft = null;
+        const wt = getActiveRoot();
+        if (wt) renderDiffFiles(wt);
+        return;
+      }
     }
   });
 
@@ -1387,7 +2139,15 @@
 
   let lastRefreshAt = 0;
   async function refreshIfActive({ silent = true, minIntervalMs = 0 } = {}) {
-    if (state.committing || state.discardPrompt) return;
+    if (
+      state.committing ||
+      state.discardPrompt ||
+      state.activeCommentDraft ||
+      state.draggingCommentRange ||
+      pendingSelectionQuote
+    ) {
+      return;
+    }
     const now = Date.now();
     if (minIntervalMs > 0 && now - lastRefreshAt < minIntervalMs) return;
     lastRefreshAt = now;
@@ -1417,7 +2177,14 @@
     });
 
     setInterval(() => {
-      if (!document.hidden && !state.committing && !state.discardPrompt) {
+      if (
+        !document.hidden &&
+        !state.committing &&
+        !state.discardPrompt &&
+        !state.activeCommentDraft &&
+        !state.draggingCommentRange &&
+        !pendingSelectionQuote
+      ) {
         refreshIfActive({ silent: true });
       }
     }, POLL_INTERVAL_MS);

@@ -1080,11 +1080,11 @@ body {
   border-collapse: collapse;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
 .diff-line {
-  white-space: pre;
+  height: 17px;
 }
 
 .diff-line.line-add {
@@ -1095,15 +1095,306 @@ body {
   background: var(--sc-del-bg);
 }
 
+.diff-line.selected-for-comment {
+  background: color-mix(in srgb, var(--primary, #3b82f6) 18%, var(--card, #1c1c21));
+  box-shadow: inset 3px 0 0 var(--primary, #3b82f6);
+}
+
 .line-num {
-  width: 34px;
-  min-width: 34px;
+  position: relative;
+  width: 38px;
+  min-width: 38px;
   padding: 0 5px;
   text-align: right;
   color: var(--muted-foreground, #71717a);
   user-select: none;
+  white-space: nowrap;
   border-right: 1px solid var(--border, rgba(128, 128, 128, 0.14));
   font-size: 10px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.line-num:hover {
+  color: var(--primary, #3b82f6);
+  background: color-mix(in srgb, var(--primary, #3b82f6) 12%, transparent);
+}
+
+.line-comment-btn {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--primary, #3b82f6) 55%, transparent);
+  background: var(--primary, #3b82f6);
+  color: var(--primary-foreground, #ffffff);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 0.1s ease, transform 0.1s ease;
+}
+
+.diff-line:hover .line-comment-btn,
+.diff-line.selected-for-comment .line-comment-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.line-comment-btn:hover {
+  transform: translateY(-50%) scale(1.08);
+}
+
+.status-pill.comment-count-pill {
+  background: var(--sc-info-bg);
+  color: var(--sc-info-fg);
+  font-weight: 600;
+}
+
+.row-btn.comment-btn:hover {
+  border-color: var(--primary, #3b82f6);
+  color: var(--primary, #3b82f6);
+}
+
+/* Inline Diff Review Comment Composer & Staged Comment Cards */
+.diff-inline-widget-row > td {
+  padding: 0;
+  white-space: normal;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--background, #141417);
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+}
+
+.file-level-comment-wrap {
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+}
+
+.diff-comment-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--primary, #3b82f6) 8%, var(--card, #1c1c21));
+  border-left: 3px solid var(--primary, #3b82f6);
+}
+
+.diff-comment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.diff-comment-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.diff-comment-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--primary, #3b82f6);
+  color: var(--primary-foreground, #ffffff);
+}
+
+.diff-comment-target {
+  font-size: 11px;
+  color: var(--foreground, #e4e4e7);
+}
+
+.diff-comment-target code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.diff-comment-mode-pill {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--secondary, #25252c);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.24));
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.diff-comment-hint {
+  font-size: 10px;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.diff-comment-quote {
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--background, #141417) 85%, #000000 15%);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.22));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--muted-foreground, #a1a1aa);
+  max-height: 82px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.diff-comment-textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 150px;
+  resize: vertical;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  background: var(--background, #141417);
+  color: var(--foreground, #e4e4e7);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.diff-comment-textarea:focus {
+  outline: 1px solid var(--primary, #3b82f6);
+  border-color: var(--primary, #3b82f6);
+}
+
+.diff-comment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diff-comment-subhint {
+  font-size: 10px;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.diff-comment-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diff-staged-comment {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--sc-info-bg) 55%, var(--card, #1c1c21));
+  border-left: 3px solid var(--sc-info-fg);
+}
+
+.diff-staged-comment-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diff-staged-comment-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diff-staged-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--sc-info-bg);
+  color: var(--sc-info-fg);
+}
+
+.diff-staged-uri-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.28));
+  background: var(--background, #141417);
+  color: var(--primary, #3b82f6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  cursor: pointer;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-staged-uri-chip:hover {
+  border-color: var(--primary, #3b82f6);
+  background: color-mix(in srgb, var(--primary, #3b82f6) 12%, var(--background, #141417));
+}
+
+.diff-staged-uri-chip code {
+  font-family: inherit;
+  font-size: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-staged-range {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.diff-staged-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.diff-staged-comment-body {
+  font-size: 11.5px;
+  color: var(--foreground, #e4e4e7);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Floating Text Selection Quote & Comment Pill */
+.selection-quote-pill {
+  position: fixed;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--primary, #3b82f6);
+  color: var(--primary-foreground, #ffffff);
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  user-select: none;
+}
+
+.selection-quote-pill:hover {
+  background: color-mix(in srgb, var(--primary, #3b82f6) 88%, #ffffff 12%);
 }
 
 .line-prefix {
@@ -1111,6 +1402,7 @@ body {
   min-width: 16px;
   text-align: center;
   user-select: none;
+  white-space: nowrap;
   color: var(--muted-foreground, #71717a);
 }
 
@@ -1126,6 +1418,7 @@ body {
 
 .line-code {
   padding: 0 8px;
+  white-space: pre;
 }
 
 .empty-state {
