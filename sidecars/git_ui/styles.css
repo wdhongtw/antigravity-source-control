@@ -828,7 +828,7 @@ body {
 
 .commit-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   font-size: 11px;
   padding: 3px 5px;
@@ -845,8 +845,42 @@ body {
   outline: 1px solid var(--primary, #3b82f6);
 }
 
+.commit-gpg-slot {
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.commit-gpg-slot.verified {
+  color: color-mix(in srgb, var(--sc-add-fg, #4ade80) 68%, var(--muted-foreground, #a1a1aa));
+  opacity: 0.72;
+  transition: opacity 0.12s ease;
+}
+
+.commit-row:hover .commit-gpg-slot.verified {
+  opacity: 0.92;
+}
+
+.commit-gpg-slot.unsigned {
+  color: var(--muted-foreground, #71717a);
+}
+
+.commit-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+}
+
 .commit-sha {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
   color: var(--primary, #3b82f6);
   flex-shrink: 0;
 }

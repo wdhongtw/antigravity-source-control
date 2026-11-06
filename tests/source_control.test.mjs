@@ -18,6 +18,7 @@ import {
   getRepositoryDiff,
   getRepositoryFileLines,
   inspectGitRepository,
+  parseCommitGpgStatus,
   parsePorcelainZStatus,
   resolveScopedGitPath,
   stageChanges,
@@ -449,6 +450,27 @@ test('parsePorcelainZStatus handles renamed files and spaces in filenames', () =
   assert.equal(parsed.counts.untracked, 1);
   assert.equal(parsed.staged[0].path, 'new name.js');
   assert.equal(parsed.staged[0].oldPath, 'old name.js');
+});
+
+test('parseCommitGpgStatus classifies verified, unverified, and unsigned commits', () => {
+  const good = parseCommitGpgStatus('G', '8CC2E9CFB3BE270C', 'Dev <dev@example.com>');
+  assert.equal(good.gpgStatus, 'G');
+  assert.equal(good.gpgVerified, true);
+  assert.equal(good.gpgSigned, true);
+  assert.equal(good.gpgKeyId, '8CC2E9CFB3BE270C');
+  assert.equal(good.gpgSigner, 'Dev <dev@example.com>');
+
+  const untrustedGood = parseCommitGpgStatus('U', 'KEY123', 'Signer');
+  assert.equal(untrustedGood.gpgVerified, true);
+  assert.equal(untrustedGood.gpgSigned, true);
+
+  const expired = parseCommitGpgStatus('X', 'KEY123', 'Signer');
+  assert.equal(expired.gpgVerified, false);
+  assert.equal(expired.gpgSigned, true);
+
+  const unsigned = parseCommitGpgStatus('N', '', '');
+  assert.equal(unsigned.gpgVerified, false);
+  assert.equal(unsigned.gpgSigned, false);
 });
 
 let failed = 0;

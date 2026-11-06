@@ -18,7 +18,7 @@ import {
 
 const SERVER_INFO = {
   name: 'git',
-  version: '0.1.9',
+  version: '0.1.12',
 };
 
 const TOOLS = [

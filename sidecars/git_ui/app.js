@@ -255,6 +255,40 @@
     showToast(`Copied path: ${absPath}`);
   }
 
+  function formatGpgTooltip({
+    gpgStatus = 'N',
+    gpgVerified = false,
+    gpgKeyId = '',
+    gpgSigner = '',
+  } = {}) {
+    const statusMap = {
+      G: 'Good signature',
+      U: 'Good signature (unknown trust)',
+      X: 'Expired signature',
+      Y: 'Signature made by expired key',
+      R: 'Signature made by revoked key',
+      B: 'Bad signature',
+      E: 'Cannot verify signature (missing public key)',
+      N: 'Unsigned commit',
+    };
+    const label = statusMap[gpgStatus] || `GPG status: ${gpgStatus}`;
+    const parts = [
+      gpgVerified ? `Verified GPG commit — ${label}` : `GPG commit — ${label}`,
+    ];
+    if (gpgSigner) parts.push(`Signer: ${gpgSigner}`);
+    if (gpgKeyId) parts.push(`Key: ${gpgKeyId}`);
+    return parts.join(' · ');
+  }
+
+  function renderCommitGpgSlotHtml(c) {
+    if (c?.gpgVerified) {
+      const tip = formatGpgTooltip(c);
+      return `<span class="commit-gpg-slot verified" title="${esc(tip)}"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5L2.5 3.8v4.2c0 3.6 2.3 6.2 5.5 7 3.2-.8 5.5-3.4 5.5-7V3.8L8 1.5z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M5.5 8.1l1.7 1.7 3.5-3.6" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+    }
+    const tipAttr = c?.gpgSigned ? ` title="${esc(formatGpgTooltip(c))}"` : '';
+    return `<span class="commit-gpg-slot unsigned"${tipAttr}><span class="commit-dot" aria-hidden="true"></span></span>`;
+  }
+
   function renderHeaderAndRoots() {
     if ($('count-roots')) {
       $('count-roots').textContent = `${state.roots.length} tracked`;
@@ -1209,6 +1243,7 @@
         .map(
           (c) => `
           <div class="commit-row${state.selectedCommit === c.sha ? ' active' : ''}" data-commit-sha="${esc(c.sha)}" title="Click to inspect commit ${esc(c.sha)} (${esc(c.author)})">
+            ${renderCommitGpgSlotHtml(c)}
             <span class="commit-sha">${esc(c.sha)}</span>
             <span class="commit-msg">${esc(c.subject)}</span>
             <span class="commit-time">${esc(c.relTime)}</span>
