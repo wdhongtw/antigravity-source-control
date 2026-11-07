@@ -894,6 +894,7 @@
       hasExplicitRev,
       ...revSpec,
       file,
+      rawLines: rawLines.trim(),
       lineRange,
     };
   }
@@ -1834,7 +1835,26 @@
     renderDiffSection(wt);
   }
 
-  async function loadDiffForSelected({ silent = false } = {}) {
+  function seedPreloadedFileLines(wtPath, diffData) {
+    if (!wtPath || !diffData?.preloadedFileLines) return;
+    const files = diffData.files || [];
+    for (const [filePath, entry] of Object.entries(diffData.preloadedFileLines)) {
+      const fileObj = files.find((f) => f.path === filePath);
+      if (!fileObj || !entry) continue;
+      const key = `${wtPath}::${diffData.mode || state.diffMode}::${state.selectedCommit}::${fileObj.path}::${fileObj.additions}:${fileObj.deletions}`;
+      state.fileLinesCache.set(key, {
+        totalLines: Number(entry.totalLines ?? 0),
+        lines: Array.isArray(entry.lines) ? entry.lines : [],
+      });
+    }
+  }
+
+  async function loadDiffForSelected({
+    silent = false,
+    targetFile = '',
+    targetLines = '',
+    hasExplicitRev = true,
+  } = {}) {
     const wt = getActiveRoot();
     if (!wt || !wt.existsOnDisk || !wt.isGitRepo) {
       state.diffData = null;
@@ -1853,9 +1873,16 @@
         baseRef: wt.baseRef,
         commit: state.selectedCommit,
         context: getContextLines(),
+        targetFile,
+        targetLines,
+        hasExplicitRev: hasExplicitRev ? '1' : '0',
       });
       if (state.selectedRootPath === wt.path) {
+        if (data.mode && data.mode !== state.diffMode && !state.selectedCommit) {
+          state.diffMode = data.mode;
+        }
         state.diffData = data;
+        seedPreloadedFileLines(wt.path, data);
       }
     } catch (err) {
       if (!silent) {
@@ -2022,7 +2049,7 @@
     }
   }
 
-  async function applyPendingDeepLink() {
+  async function applyPendingDeepLink({ skipDiffFetch = false } = {}) {
     const dl = state.pendingDeepLink;
     if (!dl || state.roots.length === 0) return false;
     state.pendingDeepLink = null;
@@ -2034,8 +2061,10 @@
       state.selectedRootPath = state.roots[0].path;
     }
 
-    state.diffMode = dl.mode || 'working';
-    state.selectedCommit = dl.commit || '';
+    if (!skipDiffFetch) {
+      state.diffMode = dl.mode || 'working';
+      state.selectedCommit = dl.commit || '';
+    }
     state.activeCommentDraft = null;
     hideSelectionQuotePill();
     state.gapExpansions.clear();
@@ -2048,7 +2077,14 @@
       }
     }
 
-    await loadDiffForSelected({ silent: false });
+    if (!skipDiffFetch) {
+      await loadDiffForSelected({
+        silent: false,
+        targetFile: dl.file || '',
+        targetLines: dl.rawLines || '',
+        hasExplicitRev: Boolean(dl.hasExplicitRev),
+      });
+    }
 
     const wt = getActiveRoot();
     if (!wt) return true;
@@ -2071,7 +2107,12 @@
     // fallback to `all` (`All vs Base`) so committed branch changes are still found.
     if (!fileObj && dl.file && !dl.hasExplicitRev && state.diffMode === 'working') {
       state.diffMode = 'all';
-      await loadDiffForSelected({ silent: false });
+      await loadDiffForSelected({
+        silent: false,
+        targetFile: dl.file || '',
+        targetLines: dl.rawLines || '',
+        hasExplicitRev: true,
+      });
       fileObj = findFileInDiffData(dl.file);
     }
 
@@ -2079,6 +2120,7 @@
       state.collapsedFiles.delete(fileObj.path);
       state.selectedChangeFile = fileObj.path;
       if (dl.lineRange) {
+        seedPreloadedFileLines(wt.path, state.diffData);
         await ensureTargetLineGapExpanded(wt, fileObj, dl.lineRange);
         state.highlightedTarget = {
           rootPath: wt.path,
@@ -2100,7 +2142,7 @@
         );
         const lineEl =
           cardEl?.querySelector('tr.target-highlighted-line') || cardEl;
-        lineEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        lineEl?.scrollIntoView({ behavior: 'auto', block: 'center' });
       });
 
       const toastSuffix = dl.lineRange ? ` (${dl.lineRange.displayLabel})` : '';
@@ -2998,7 +3040,78 @@
     state.conversationId = resolveConversationId();
     consumeUrlDeepLinkParams();
     lastRefreshAt = Date.now();
-    await refreshAll({ silent: false });
+
+    const boot = window.__INITIAL_SC_BOOT__;
+    if (boot?.rootsData && Array.isArray(boot.rootsData.repositories)) {
+      window.__INITIAL_SC_BOOT__ = null;
+      const rData = boot.rootsData;
+      if (!state.conversationId && rData.conversationId) {
+        state.conversationId = rData.conversationId;
+      }
+      state.uiAssetVersion = rData.uiAssetVersion || '';
+      state.roots = rData.repositories || [];
+      state.projectId = rData.projectId || '';
+      state.projectName = rData.projectName || '';
+      state.isForkedSession = Boolean(rData.isForkedSession);
+      state.parentConversationId = rData.parentConversationId || '';
+      state.selectedRootPath =
+        boot.selectedRootPath || state.roots[0]?.path || '';
+      state.diffMode = boot.diffMode || 'working';
+      state.selectedCommit = boot.selectedCommit || '';
+      state.diffData = boot.diffData || null;
+      if (state.selectedRootPath && state.diffData) {
+        seedPreloadedFileLines(state.selectedRootPath, state.diffData);
+      }
+
+      if (state.roots.length === 0) {
+        renderHeaderAndRoots();
+      } else if (state.pendingDeepLink) {
+        await applyPendingDeepLink({ skipDiffFetch: Boolean(state.diffData) });
+      } else {
+        renderActiveWorkspace();
+        if (!state.diffData) {
+          await loadDiffForSelected({ silent: false });
+        }
+      }
+    } else if (state.pendingDeepLink) {
+      // Parallel fetch of `/api/roots` and `/api/diff` when server-injected boot state was not available
+      const dl = state.pendingDeepLink;
+      try {
+        const [rootsData, diffData] = await Promise.all([
+          apiGet('/api/roots', { conversationId: state.conversationId }),
+          apiGet('/api/diff', {
+            repo: dl.repo || '',
+            conversationId: state.conversationId,
+            mode: dl.mode || 'working',
+            commit: dl.commit || '',
+            context: getContextLines(),
+            targetFile: dl.file || '',
+            targetLines: dl.rawLines || '',
+            hasExplicitRev: dl.hasExplicitRev ? '1' : '0',
+          }).catch(() => null),
+        ]);
+        state.uiAssetVersion = rootsData.uiAssetVersion || '';
+        state.roots = rootsData.repositories || [];
+        state.projectId = rootsData.projectId || '';
+        state.projectName = rootsData.projectName || '';
+        state.isForkedSession = Boolean(rootsData.isForkedSession);
+        state.parentConversationId = rootsData.parentConversationId || '';
+        if (diffData && !diffData.error && diffData.path) {
+          state.selectedRootPath = diffData.path;
+          state.diffMode = diffData.mode || dl.mode || 'working';
+          state.selectedCommit = dl.commit || '';
+          state.diffData = diffData;
+          seedPreloadedFileLines(diffData.path, diffData);
+          await applyPendingDeepLink({ skipDiffFetch: true });
+        } else {
+          await applyPendingDeepLink({ skipDiffFetch: false });
+        }
+      } catch {
+        await refreshAll({ silent: false });
+      }
+    } else {
+      await refreshAll({ silent: false });
+    }
 
     // Refresh automatically when the pane becomes visible, focused, or interacted with
     window.addEventListener('focus', () => {

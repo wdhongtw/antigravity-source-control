@@ -17,10 +17,15 @@ import {
   getRepositoryDiff,
   getRepositoryFileLines,
   inspectGitRepository,
+  normalizeDiffRevSpec,
+  resolveRepositoryFromQuery,
   stageChanges,
   unstageChanges,
 } from '../../lib/git_service.mjs';
-import { getSessionRepoState } from '../../lib/session_repos.mjs';
+import {
+  discoverRecentConversationId,
+  getSessionRepoState,
+} from '../../lib/session_repos.mjs';
 import { HttpResponse, RawSidecarServer } from '../../lib/sidecar_http.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +34,24 @@ const STATIC_ASSETS = {
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/app.js': ['app.js', 'application/javascript; charset=utf-8'],
 };
+
+const staticFileCache = new Map();
+
+function readCachedAsset(fileName) {
+  const fullPath = join(__dirname, fileName);
+  try {
+    const mtimeMs = Math.floor(statSync(fullPath).mtimeMs);
+    const cached = staticFileCache.get(fileName);
+    if (cached && cached.mtimeMs === mtimeMs) {
+      return cached.content;
+    }
+    const content = readFileSync(fullPath, 'utf-8');
+    staticFileCache.set(fileName, { mtimeMs, content });
+    return content;
+  } catch {
+    return readFileSync(fullPath, 'utf-8');
+  }
+}
 
 function computeUiAssetVersion() {
   try {
@@ -43,16 +66,133 @@ function computeUiAssetVersion() {
 
 const app = new RawSidecarServer();
 
-app.page('/', () => readFileSync(join(__dirname, 'index.html'), 'utf-8'));
-app.page('/fullscreen', () =>
-  readFileSync(join(__dirname, 'index.html'), 'utf-8')
-);
+async function buildRootsPayload(conversationId) {
+  const sessionState = await getSessionRepoState(conversationId);
+  const repositories = await Promise.all(
+    sessionState.repositories.map((entry) => inspectGitRepository(entry))
+  );
+
+  return {
+    conversationId,
+    projectId: sessionState.projectId,
+    projectName: sessionState.projectName,
+    isForkedSession: sessionState.isForkedSession,
+    parentConversationId: sessionState.parentConversationId,
+    repositories,
+    uiAssetVersion: computeUiAssetVersion(),
+    timestamp: Date.now(),
+  };
+}
+
+async function buildInitialBootState(url) {
+  const params = url?.searchParams;
+  const conversationId =
+    params?.get('conversationId') ||
+    app.config.conversationId ||
+    discoverRecentConversationId() ||
+    '';
+  const sessionState = await getSessionRepoState(conversationId);
+  const rawRepos = sessionState.repositories || [];
+  if (rawRepos.length === 0) {
+    return {
+      rootsData: {
+        conversationId,
+        projectId: sessionState.projectId,
+        projectName: sessionState.projectName,
+        isForkedSession: sessionState.isForkedSession,
+        parentConversationId: sessionState.parentConversationId,
+        repositories: [],
+        uiAssetVersion: computeUiAssetVersion(),
+        timestamp: Date.now(),
+      },
+      selectedRootPath: '',
+      diffData: null,
+    };
+  }
+
+  const repoQuery =
+    params?.get('repo') || params?.get('path') || params?.get('root') || '';
+  const selectedRootPath =
+    resolveRepositoryFromQuery(repoQuery, rawRepos) || rawRepos[0].path;
+  const matchedEntry =
+    rawRepos.find((r) => r.path === selectedRootPath) || rawRepos[0];
+
+  const hasExplicitRev = Boolean(
+    params?.has('rev') || params?.has('mode') || params?.has('commit')
+  );
+  const revSpec = normalizeDiffRevSpec({
+    rev: params?.get('rev') || '',
+    mode: params?.get('mode') || '',
+    commit: params?.get('commit') || '',
+  });
+  const targetFile = (params?.get('file') || '').trim().replace(/^\/+/, '');
+  const targetLines = params?.get('lines') || params?.get('line') || '';
+
+  // Run repository inspections and the target repository diff concurrently in one wave
+  const [repositories, diffData] = await Promise.all([
+    Promise.all(rawRepos.map((entry) => inspectGitRepository(entry))),
+    matchedEntry?.existsOnDisk && matchedEntry?.isGitRepo
+      ? getRepositoryDiff(matchedEntry.path, {
+          mode: revSpec.mode || 'working',
+          baseRef: matchedEntry.baseRef || '',
+          commit: revSpec.commit || '',
+          context: 3,
+          targetFile,
+          targetLines,
+          hasExplicitRev,
+        })
+      : Promise.resolve(null),
+  ]);
+
+  const rootsData = {
+    conversationId,
+    projectId: sessionState.projectId,
+    projectName: sessionState.projectName,
+    isForkedSession: sessionState.isForkedSession,
+    parentConversationId: sessionState.parentConversationId,
+    repositories,
+    uiAssetVersion: computeUiAssetVersion(),
+    timestamp: Date.now(),
+  };
+
+  return {
+    rootsData,
+    selectedRootPath: matchedEntry.path,
+    diffMode: diffData?.mode || revSpec.mode || 'working',
+    selectedCommit: revSpec.commit || '',
+    diffData,
+  };
+}
+
+async function renderIndexHtmlWithBoot(url) {
+  const rawHtml = readCachedAsset('index.html');
+  let bootState = null;
+  try {
+    bootState = await Promise.race([
+      buildInitialBootState(url),
+      new Promise((resolve) => setTimeout(() => resolve(null), 250)),
+    ]);
+  } catch {
+    bootState = null;
+  }
+
+  if (!bootState) {
+    return rawHtml;
+  }
+
+  const safeJson = JSON.stringify(bootState).replace(/</g, '\\u003c');
+  const bootScript = `<script>window.__INITIAL_SC_BOOT__=${safeJson};</script>\n  <script src="/app.js"></script>`;
+  return rawHtml.replace('<script src="/app.js"></script>', bootScript);
+}
+
+app.page('/', (url) => renderIndexHtmlWithBoot(url));
+app.page('/fullscreen', (url) => renderIndexHtmlWithBoot(url));
 
 for (const [route, [file, contentType]] of Object.entries(STATIC_ASSETS)) {
   app.api(
     route,
     () =>
-      new HttpResponse(readFileSync(join(__dirname, file), 'utf-8'), {
+      new HttpResponse(readCachedAsset(file), {
         contentType,
       }),
     'GET'
@@ -64,21 +204,7 @@ app.api(
   async (data) => {
     const conversationId =
       data.conversationId || app.config.conversationId || '';
-    const sessionState = await getSessionRepoState(conversationId);
-    const repositories = await Promise.all(
-      sessionState.repositories.map((entry) => inspectGitRepository(entry))
-    );
-
-    return {
-      conversationId,
-      projectId: sessionState.projectId,
-      projectName: sessionState.projectName,
-      isForkedSession: sessionState.isForkedSession,
-      parentConversationId: sessionState.parentConversationId,
-      repositories,
-      uiAssetVersion: computeUiAssetVersion(),
-      timestamp: Date.now(),
-    };
+    return await buildRootsPayload(conversationId);
   },
   'GET'
 );
@@ -86,11 +212,29 @@ app.api(
 app.api(
   '/api/diff',
   async (data) => {
-    return await getRepositoryDiff(data.path || '', {
+    let targetPath = String(data.path || '').trim();
+    if (!targetPath && data.repo) {
+      const conversationId =
+        data.conversationId || app.config.conversationId || '';
+      const sessionState = await getSessionRepoState(conversationId);
+      targetPath = resolveRepositoryFromQuery(
+        data.repo,
+        sessionState.repositories
+      );
+    }
+    const hasExplicitRev =
+      data.hasExplicitRev === undefined
+        ? true
+        : data.hasExplicitRev !== '0' && data.hasExplicitRev !== false;
+
+    return await getRepositoryDiff(targetPath, {
       mode: data.mode || 'working',
       baseRef: data.baseRef || '',
       commit: data.commit || '',
       context: data.context ?? 3,
+      targetFile: data.targetFile || '',
+      targetLines: data.targetLines || '',
+      hasExplicitRev,
     });
   },
   'GET'
@@ -195,4 +339,27 @@ for (const watched of [
   }).unref();
 }
 
-app.run();
+app.run().then(() => {
+  // Pre-warm trajectory, repository topology, and commit GPG caches across all tracked repos
+  setTimeout(async () => {
+    try {
+      const warmConvId =
+        app.config.conversationId || discoverRecentConversationId() || '';
+      if (!warmConvId) return;
+      const roots = await buildRootsPayload(warmConvId);
+      await Promise.all(
+        (roots.repositories || []).map((repo) =>
+          repo?.existsOnDisk && repo?.isGitRepo
+            ? getRepositoryDiff(repo.path, {
+                mode: 'working',
+                baseRef: repo.baseRef || '',
+                context: 3,
+              })
+            : null
+        )
+      );
+    } catch {
+      // Ignore pre-warm errors
+    }
+  }, 50).unref?.();
+});

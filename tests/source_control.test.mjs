@@ -604,6 +604,20 @@ test('parseDiffLineRange, parseDiffAnchorUri, formatDiffAnchorLink, and git_diff
     assert.equal(mcpPayload.ok, true);
     assert.equal(mcpPayload.file, 'pipeline.js');
     assert.ok(mcpPayload.markdownPill.includes('sidecar://source-control/git_ui/'));
+
+    // 4. Single-round-trip deep-link preloading (`preloadedFileLines` for lines in a context gap)
+    const gapPreloadDiff = await getRepositoryDiff(repoDir, {
+      mode: 'unstaged',
+      context: 3,
+      targetFile: 'pipeline.js',
+      targetLines: 'L5',
+      hasExplicitRev: true,
+    });
+    assert.ok(gapPreloadDiff.preloadedFileLines?.['pipeline.js']);
+    assert.equal(
+      gapPreloadDiff.preloadedFileLines['pipeline.js'].totalLines,
+      30
+    );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
