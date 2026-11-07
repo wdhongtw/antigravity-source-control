@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   commitRepositoryChanges,
   discardChanges,
+  formatDiffReviewMessage,
   getRepositoryDiff,
   getRepositoryFileLines,
   inspectGitRepository,
@@ -148,6 +149,36 @@ app.api(
       amend: Boolean(data.amend),
       stageAll: Boolean(data.stageAll),
     });
+  },
+  'POST'
+);
+
+app.api(
+  '/api/send-review',
+  async (data) => {
+    const conversationId =
+      data.conversationId || app.config.conversationId || '';
+    const formatted = formatDiffReviewMessage({
+      comments: Array.isArray(data.comments) ? data.comments : [],
+      summaryNote: data.summaryNote || '',
+      repositoryName: data.repositoryName || '',
+      repositoryPath: data.repositoryPath || '',
+    });
+    if (!Boolean(data.dryRun)) {
+      await app.sendMessage(conversationId, formatted.markdown, {
+        title: formatted.title,
+        projectId: data.projectId || app.config.projectId || '',
+      });
+    }
+    return {
+      ok: true,
+      conversationId,
+      title: formatted.title,
+      markdown: formatted.markdown,
+      commentCount: formatted.commentCount,
+      fileCount: formatted.fileCount,
+      anchors: formatted.anchors,
+    };
   },
   'POST'
 );

@@ -35,11 +35,12 @@ commit stack inspector from `worktree-inspector`.
     to jump directly into the Source Control AuxPane at the target repository,
     diff mode/commit, file, and highlighted line range (with automatic
     collapsed-gap expansion).
-  - Select single or multi-line ranges in the diff table to stage native
-    `add-artifact-comment` review comments
-    (`git-diff://<repo>.local/<rev>/<file>`) into the host Chat input box, or
-    click **🔗 Link** / **🔗 Copy Pill** to copy a clickable
-    `sidecar://source-control/git_ui/?...` Markdown pill.
+  - Select single or multi-line ranges in the diff table to **Send to Chat**
+    immediately or **+ Add to Batch** in the Review Batch bar/modal (with an
+    optional overall summary note), posting a structured Markdown code review
+    message with clickable `sidecar://source-control/git_ui/?...` diff pills and
+    unified `diff` blocks directly to the active conversation via `agentapi`, or
+    click **🔗 Link** / **🔗 Copy Pill** to copy a clickable diff pill.
 - **Client-Side Session Fork Inheritance**:
   - Registered repositories and worktrees are stored as
     `CORTEX_STEP_TYPE_MCP_TOOL` / `CORTEX_STEP_TYPE_GENERIC` steps in

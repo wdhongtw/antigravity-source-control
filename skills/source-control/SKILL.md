@@ -61,8 +61,9 @@ Or for a specific commit:
 
 ## 3. Inspecting More Context from a Logical Diff Anchor (`git_diff_context`)
 
-When a conversation message, report, or inline diff review comment references a
-logical diff anchor (`sidecar://source-control/git_ui/?...` or
+When a conversation message, report, or inline diff review message submitted
+from the Source Control panel references a logical diff anchor
+(`sidecar://source-control/git_ui/?...` or
 `git-diff://<repo>.local/<rev>/<file>`), you can inspect surrounding diff hunks
 and file context in two ways:
 

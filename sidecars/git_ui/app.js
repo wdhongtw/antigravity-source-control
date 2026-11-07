@@ -42,10 +42,13 @@
     // Inline diff review commenting state:
     // renderedFileRows: Map<filePath, Array<{ rowIdx, type, oldNo, newNo, text, hunkHeader }>>
     renderedFileRows: new Map(),
-    // activeCommentDraft: { filePath, anchorRowIdx, startRowIdx, endRowIdx, text, quotedText } | null
+    // activeCommentDraft: { filePath, anchorRowIdx, startRowIdx, endRowIdx, text, quotedText, editingCommentId } | null
     activeCommentDraft: null,
-    // stagedComments: Array<{ id, rootPath, filePath, customUri, logicalUri, diffMode, commitSha, startRowIdx, endRowIdx, rangeLabel, modeLabel, snippet, beforeText, afterText, startLine, endLine, text }>
-    stagedComments: [],
+    // reviewComments: Array<{ id, rootPath, repoName, filePath, customUri, sidecarUri, markdownPill, diffMode, commitSha, startRowIdx, endRowIdx, rangeLabel, urlRangeSpec, modeLabel, hunkHeader, snippet, quotePreview, text }>
+    reviewComments: [],
+    reviewSummaryNote: '',
+    reviewModalOpen: false,
+    sendingReview: false,
     // Drag selection state on line numbers
     draggingCommentRange: null, // { filePath, anchorRowIdx } | null
     // Deep-link target from `sidecar://source-control/git_ui/?repo=...&rev=...&file=...&lines=...`
@@ -723,20 +726,6 @@
     return `git-diff://${repoSlug}.local/${revSlug}/${cleanRelPath}`;
   }
 
-  /**
-   * Builds the host `add-artifact-comment` wrapper URI (`file:///git-diff/<repo>.local/<rev>/<filePath>`),
-   * since host `toFileUri` / `toLocalFileUri` enforces a `file:///` scheme prefix on native composer pills.
-   */
-  function buildLogicalDiffUri(wt, filePath, diffMode = state.diffMode, commitSha = state.selectedCommit) {
-    const { repoSlug, revSlug, cleanRelPath } = buildLogicalDiffParts(
-      wt,
-      filePath,
-      diffMode,
-      commitSha
-    );
-    return `file:///git-diff/${repoSlug}.local/${revSlug}/${cleanRelPath}`;
-  }
-
   function normalizeDiffRevParam({ rev = '', mode = '', commit = '' } = {}) {
     const rawCommit = String(commit || '')
       .trim()
@@ -909,54 +898,49 @@
     };
   }
 
-  function buildGitDiffProvenanceHeader(
-    wt,
-    filePath,
-    hunkHeader = '',
-    diffMode = state.diffMode,
-    commitSha = state.selectedCommit,
-    linesSpec = ''
-  ) {
-    const customUri = buildCustomDiffUri(wt, filePath, diffMode, commitSha);
-    const { sidecarUri } = buildSidecarDiffLink(
-      wt,
-      filePath,
-      linesSpec,
-      diffMode,
-      commitSha
-    );
-    let gitCmd = `git diff HEAD -- ${filePath}`;
-    if (commitSha) {
-      gitCmd = `git show ${commitSha} -- ${filePath}`;
-    } else if (diffMode === 'staged') {
-      gitCmd = `git diff --cached -- ${filePath}`;
-    } else if (diffMode === 'unstaged') {
-      gitCmd = `git diff -- ${filePath}`;
-    } else if (diffMode === 'all') {
-      gitCmd = `git diff ${wt.baseRef || 'HEAD'} -- ${filePath}`;
-    } else if (diffMode === 'branch') {
-      gitCmd = `git diff ${wt.baseRef || 'HEAD'}...HEAD -- ${filePath}`;
-    }
-    const hunkPart = hunkHeader ? ` · ${hunkHeader}` : '';
-    return `[Logical Git diff · URI: ${customUri} · anchor: ${sidecarUri} · repo: ${wt.path} · \`${gitCmd}\`${hunkPart}]`;
+  function formatDiffSnippetRow(r, isSelected = false) {
+    const marker = isSelected ? '>' : ' ';
+    const oldPad =
+      r.oldNo !== null && r.oldNo !== undefined
+        ? String(r.oldNo).padStart(4, ' ')
+        : '    ';
+    const newPad =
+      r.newNo !== null && r.newNo !== undefined
+        ? String(r.newNo).padStart(4, ' ')
+        : '    ';
+    const prefix = formatDiffRowPrefix(r.type);
+    return `${marker} ${oldPad} ${newPad} | ${prefix}${r.text}`;
   }
 
-  function computeCommentSelectionMeta(filePath, startRowIdx, endRowIdx, quotedText = '', wt = getActiveRoot()) {
+  function computeCommentSelectionMeta(
+    filePath,
+    startRowIdx,
+    endRowIdx,
+    quotedText = '',
+    wt = getActiveRoot()
+  ) {
     const rows = state.renderedFileRows.get(filePath) || [];
-    const provenanceHeader = wt
-      ? buildGitDiffProvenanceHeader(wt, filePath, '')
-      : '';
     if (startRowIdx < 0 || rows.length === 0) {
-      const fallbackContent =
-        quotedText.trim() || `[File diff review on ${filePath}]`;
+      const fallbackContent = quotedText.trim() || '';
+      const linkInfo = wt
+        ? buildSidecarDiffLink(
+            wt,
+            filePath,
+            '',
+            state.diffMode,
+            state.selectedCommit
+          )
+        : { sidecarUri: '', markdownPill: `\`${filePath}\`` };
       return {
         rangeLabel: 'File-level diff comment',
         urlRangeSpec: '',
         startLine: 1,
         endLine: 1,
-        content: fallbackContent,
-        beforeText: provenanceHeader || undefined,
-        afterText: undefined,
+        hunkHeader: '',
+        snippet: fallbackContent,
+        quotePreview: fallbackContent || `[File diff review on ${filePath}]`,
+        sidecarUri: linkInfo.sidecarUri,
+        markdownPill: linkInfo.markdownPill,
       };
     }
 
@@ -991,96 +975,71 @@
           : `-L${startLine}-L${endLine}`;
     }
 
-    const fullProvenance = wt
-      ? buildGitDiffProvenanceHeader(
-          wt,
-          filePath,
-          hunkHeader,
-          state.diffMode,
-          state.selectedCommit,
-          urlRangeSpec
-        )
-      : '';
-
     const rangeParts = [];
     if (oldNos.length > 0) {
       const oMin = Math.min(...oldNos);
       const oMax = Math.max(...oldNos);
-      rangeParts.push(oMin === oMax ? `-L${oMin}` : `-L${oMin}–${oMax}`);
+      rangeParts.push(oMin === oMax ? `-L${oMin}` : `-L${oMin}-L${oMax}`);
     }
     if (newNos.length > 0) {
       const nMin = Math.min(...newNos);
       const nMax = Math.max(...newNos);
-      rangeParts.push(nMin === nMax ? `+L${nMin}` : `+L${nMin}–${nMax}`);
+      rangeParts.push(nMin === nMax ? `+L${nMin}` : `+L${nMin}-L${nMax}`);
     }
     const rangeLabel = rangeParts.join(' / ') || `L${startLine}`;
 
-    const diffSnippet = selectedRows
-      .map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`)
-      .join('\n');
-    const content =
+    const linkInfo = wt
+      ? buildSidecarDiffLink(
+          wt,
+          filePath,
+          urlRangeSpec,
+          state.diffMode,
+          state.selectedCommit
+        )
+      : { sidecarUri: '', markdownPill: `\`${filePath}\`` };
+
+    const ctxStart = Math.max(0, lo - 2);
+    const ctxEnd = Math.min(rows.length - 1, hi + 2);
+    const snippetRows = [];
+    for (let idx = ctxStart; idx <= ctxEnd; idx++) {
+      const r = rows[idx];
+      if (!r) continue;
+      if (idx < lo && hunkHeader && r.hunkHeader && r.hunkHeader !== hunkHeader) {
+        continue;
+      }
+      if (idx > hi && hunkHeader && r.hunkHeader && r.hunkHeader !== hunkHeader) {
+        continue;
+      }
+      snippetRows.push(formatDiffSnippetRow(r, idx >= lo && idx <= hi));
+    }
+
+    const quotePreview =
       quotedText && quotedText.trim() && selectedRows.length === 1
         ? `${formatDiffRowPrefix(selectedRows[0].type)}${quotedText}`
-        : diffSnippet || `[Lines ${rangeLabel}]`;
-
-    const beforeRows = rows.slice(Math.max(0, lo - 2), lo);
-    const afterRows = rows.slice(hi + 1, Math.min(rows.length, hi + 3));
-
-    const beforeLines = [];
-    if (fullProvenance) {
-      beforeLines.push(fullProvenance);
-    }
-    if (beforeRows.length > 0) {
-      beforeLines.push(
-        beforeRows.map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`).join('\n')
-      );
-    }
-    const beforeText = beforeLines.length > 0 ? beforeLines.join('\n') : undefined;
-    const afterText =
-      afterRows.length > 0
-        ? afterRows.map((r) => `${formatDiffRowPrefix(r.type)}${r.text}`).join('\n')
-        : undefined;
+        : selectedRows
+            .map((r) => formatDiffSnippetRow(r, true))
+            .join('\n') || `[Lines ${rangeLabel}]`;
 
     return {
       rangeLabel,
       urlRangeSpec,
       startLine,
       endLine: Math.max(startLine, endLine),
-      content,
-      beforeText,
-      afterText,
+      hunkHeader,
+      snippet: snippetRows.join('\n'),
+      quotePreview,
+      sidecarUri: linkInfo.sidecarUri,
+      markdownPill: linkInfo.markdownPill,
     };
   }
 
-  function postAddArtifactCommentToHost(payload) {
-    if (window.sidecar?.ui?.addArtifactComment) {
-      window.sidecar.ui.addArtifactComment(payload);
-      return true;
-    }
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage(
-        {
-          type: 'add-artifact-comment',
-          payload,
-        },
-        '*'
-      );
-      return true;
-    }
-    return false;
-  }
-
-  function submitActiveCommentDraft() {
-    const wt = getActiveRoot();
-    const draft = state.activeCommentDraft;
-    if (!wt || !draft) return;
-
+  function buildCommentItemFromDraft(wt, draft) {
     syncCommentDraftTextFromDom();
-    const commentText = (draft.text || '').trim();
+    const commentText = (draft?.text || '').trim();
     if (!commentText) {
       showToast('Please enter a review comment');
       focusCommentDraftTextarea();
-      return;
+      return null;
     }
 
     const meta = computeCommentSelectionMeta(
@@ -1097,53 +1056,148 @@
       state.diffMode,
       state.selectedCommit
     );
-    const hostUri = buildLogicalDiffUri(
-      wt,
-      draft.filePath,
-      state.diffMode,
-      state.selectedCommit
+    const repoName = (wt?.name || wt?.displayName || 'repo').replace(
+      /\.local$/i,
+      ''
     );
-    const pageTitle = `${customUri} (${modeLabel} diff · ${meta.rangeLabel})`;
 
-    const payload = {
-      uri: hostUri,
-      pageTitle,
-      comment: commentText,
-      selection: {
-        content: meta.content,
-        ...(meta.beforeText ? { beforeText: meta.beforeText } : {}),
-        ...(meta.afterText ? { afterText: meta.afterText } : {}),
-        startLine: meta.startLine,
-        endLine: meta.endLine,
-      },
-    };
-
-    postAddArtifactCommentToHost(payload);
-
-    state.stagedComments.push({
-      id: `sc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    return {
+      id:
+        draft.editingCommentId ||
+        `rc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       rootPath: wt.path,
+      repoName,
       filePath: draft.filePath,
       customUri,
-      logicalUri: hostUri,
+      sidecarUri: meta.sidecarUri,
+      markdownPill: meta.markdownPill,
       diffMode: state.diffMode,
       commitSha: state.selectedCommit,
       startRowIdx: draft.startRowIdx,
       endRowIdx: draft.endRowIdx,
       rangeLabel: meta.rangeLabel,
+      urlRangeSpec: meta.urlRangeSpec,
       modeLabel,
-      snippet: meta.content,
-      beforeText: meta.beforeText,
-      afterText: meta.afterText,
-      startLine: meta.startLine,
-      endLine: meta.endLine,
+      hunkHeader: meta.hunkHeader,
+      snippet: meta.snippet,
+      quotePreview: meta.quotePreview,
       text: commentText,
-    });
+    };
+  }
+
+  function queueActiveCommentDraft() {
+    const wt = getActiveRoot();
+    const draft = state.activeCommentDraft;
+    if (!wt || !draft) return;
+
+    const item = buildCommentItemFromDraft(wt, draft);
+    if (!item) return;
+
+    const existingIdx = state.reviewComments.findIndex((c) => c.id === item.id);
+    if (existingIdx >= 0) {
+      state.reviewComments[existingIdx] = item;
+    } else {
+      state.reviewComments.push(item);
+    }
 
     state.activeCommentDraft = null;
     hideSelectionQuotePill();
     renderDiffFiles(wt);
-    showToast(`Added comment on ${customUri} (${meta.rangeLabel}) to Chat`);
+    renderReviewBatchBar();
+    showToast(
+      `Queued review comment #${state.reviewComments.length} (${item.filePath} · ${item.rangeLabel})`
+    );
+  }
+
+  async function dispatchReviewComments(
+    commentsToSend,
+    { summaryNote = '', clearFromQueueIds = [] } = {}
+  ) {
+    if (!Array.isArray(commentsToSend) || commentsToSend.length === 0) return;
+    if (state.sendingReview) return;
+    const wt = getActiveRoot();
+    state.sendingReview = true;
+    renderReviewBatchBar();
+    if (state.reviewModalOpen) renderReviewModal();
+
+    try {
+      const res = await apiPost('/api/send-review', {
+        conversationId: state.conversationId || resolveConversationId(),
+        projectId: state.projectId || '',
+        repositoryName: wt?.name || wt?.displayName || '',
+        repositoryPath: wt?.path || '',
+        summaryNote,
+        comments: commentsToSend,
+      });
+
+      if (clearFromQueueIds.length > 0) {
+        const removeSet = new Set(clearFromQueueIds);
+        state.reviewComments = state.reviewComments.filter(
+          (c) => !removeSet.has(c.id)
+        );
+      }
+      if (state.reviewComments.length === 0) {
+        state.reviewSummaryNote = '';
+        state.reviewModalOpen = false;
+      }
+
+      const count = res.commentCount || commentsToSend.length;
+      showToast(
+        count === 1
+          ? `Sent diff review comment to conversation`
+          : `Sent ${count} diff review comments to conversation`
+      );
+    } catch (err) {
+      showToast(`Failed to send review: ${err.message}`);
+    } finally {
+      state.sendingReview = false;
+      const currentWt = getActiveRoot();
+      if (currentWt) renderDiffFiles(currentWt);
+      renderReviewBatchBar();
+      renderReviewModal();
+    }
+  }
+
+  async function sendActiveCommentDraftNow() {
+    const wt = getActiveRoot();
+    const draft = state.activeCommentDraft;
+    if (!wt || !draft) return;
+
+    const item = buildCommentItemFromDraft(wt, draft);
+    if (!item) return;
+
+    state.activeCommentDraft = null;
+    hideSelectionQuotePill();
+    renderDiffFiles(wt);
+
+    // If the user was editing an existing queued comment or has queued batch comments,
+    // include the active comment with any queued comments if they match or send directly.
+    if (draft.editingCommentId) {
+      const idx = state.reviewComments.findIndex(
+        (c) => c.id === draft.editingCommentId
+      );
+      if (idx >= 0) state.reviewComments[idx] = item;
+    }
+
+    if (state.reviewComments.length > 0 && !draft.editingCommentId) {
+      // Send the active comment along with the queued batch
+      const allToSend = [...state.reviewComments, item];
+      const clearIds = state.reviewComments.map((c) => c.id);
+      await dispatchReviewComments(allToSend, {
+        summaryNote: state.reviewSummaryNote,
+        clearFromQueueIds: clearIds,
+      });
+    } else if (draft.editingCommentId) {
+      await dispatchReviewComments([item], {
+        summaryNote: '',
+        clearFromQueueIds: [item.id],
+      });
+    } else {
+      await dispatchReviewComments([item], {
+        summaryNote: '',
+        clearFromQueueIds: [],
+      });
+    }
   }
 
   function renderInlineCommentDraftCardHtml(filePath) {
@@ -1158,21 +1212,29 @@
       wt
     );
     const modeLabel = formatCurrentDiffModeLabel();
-    const customUri = wt
-      ? buildCustomDiffUri(wt, filePath, state.diffMode, state.selectedCommit)
-      : `git-diff://repo.local/${filePath}`;
-    const snippetLines = (meta.content || '').split('\n');
+    const snippetLines = (meta.quotePreview || '').split('\n');
     const previewSnippet =
       snippetLines.length > 4
         ? `${snippetLines.slice(0, 4).join('\n')}\n… (${snippetLines.length - 4} more line${snippetLines.length - 4 === 1 ? '' : 's'})`
-        : meta.content;
+        : meta.quotePreview;
+    const queuedCount = state.reviewComments.length;
+    const isEditing = Boolean(draft.editingCommentId);
+    const sendBtnLabel =
+      !isEditing && queuedCount > 0
+        ? `Send All (${queuedCount + 1})`
+        : 'Send to Chat';
+    const queueBtnLabel = isEditing
+      ? 'Save in Batch'
+      : queuedCount > 0
+        ? `+ Add to Batch (${queuedCount})`
+        : '+ Add to Batch';
 
     return `
       <div class="diff-comment-box" data-comment-draft-box="1">
         <div class="diff-comment-header">
           <div class="diff-comment-header-left">
-            <span class="diff-comment-badge">Review Comment</span>
-            <span class="diff-comment-target"><code>${esc(customUri)}</code> · <strong>${esc(meta.rangeLabel)}</strong></span>
+            <span class="diff-comment-badge">${isEditing ? 'Edit Review Comment' : 'Review Comment'}</span>
+            <span class="diff-comment-target"><code>${esc(filePath)}</code> · <strong>${esc(meta.rangeLabel)}</strong></span>
             <span class="diff-comment-mode-pill">${esc(modeLabel)}</span>
             <button type="button" class="row-btn" data-action="copy-comment-diff-link" title="Copy clickable Markdown diff pill for this line range">🔗 Copy Pill</button>
           </div>
@@ -1183,35 +1245,131 @@
           id="diff-comment-input"
           class="diff-comment-textarea"
           rows="2"
-          placeholder="Ask a question or request changes on these diff lines… (Ctrl+Enter to add to Chat, Esc to cancel)"
+          placeholder="Ask a question or request changes on these diff lines… (Ctrl+Enter to Send to Chat, Alt+Enter to Add to Batch, Esc to cancel)"
         >${esc(draft.text || '')}</textarea>
         <div class="diff-comment-actions">
-          <span class="diff-comment-subhint">Stages into host Chat input box as a native review comment pill</span>
+          <span class="diff-comment-subhint">Posts a structured diff review message with clickable <code>sidecar://</code> anchors to Chat</span>
           <div class="diff-comment-btns">
             <button type="button" class="ghost-btn sm" data-action="cancel-diff-comment">Cancel</button>
-            <button type="button" class="ghost-btn sm primary" data-action="submit-diff-comment">Add to Chat</button>
+            <button type="button" class="ghost-btn sm" data-action="queue-diff-comment" title="Queue this comment in the Review Batch so you can add more comments before sending (Alt+Enter)">${esc(queueBtnLabel)}</button>
+            <button type="button" class="ghost-btn sm primary" data-action="send-diff-comment-now" title="Send diff review message directly to the active conversation now (Ctrl+Enter)">${esc(sendBtnLabel)}</button>
           </div>
         </div>
       </div>`;
   }
 
-  function renderStagedCommentCardHtml(c) {
-    const uriLabel = c.customUri || `git-diff://repo.local/${c.filePath}`;
+  function renderQueuedCommentCardHtml(c, queueIndex) {
     return `
       <div class="diff-staged-comment" data-staged-comment-id="${esc(c.id)}">
         <div class="diff-staged-comment-top">
           <div class="diff-staged-comment-meta">
-            <span class="diff-staged-pill">Staged in Chat</span>
-            <button type="button" class="diff-staged-uri-chip" data-action="copy-path" data-path="${esc(uriLabel)}" title="Click to copy ${esc(uriLabel)}"><code>${esc(uriLabel)}</code></button>
-            <span class="diff-staged-range">${esc(c.rangeLabel)} · ${esc(c.modeLabel)}</span>
+            <span class="diff-staged-pill">Queued #${queueIndex + 1}</span>
+            <button type="button" class="diff-staged-uri-chip" data-action="copy-queued-pill" data-comment-id="${esc(c.id)}" title="Click to copy clickable Markdown diff pill"><code>${esc(c.filePath)} (${esc(c.rangeLabel)})</code></button>
+            <span class="diff-staged-range">${esc(c.modeLabel)}</span>
           </div>
           <div class="diff-staged-actions">
-            <button type="button" class="row-btn" data-action="restage-diff-comment" data-comment-id="${esc(c.id)}" title="Re-send this comment to the host Chat input pill">Re-add to Chat</button>
-            <button type="button" class="row-btn danger" data-action="dismiss-staged-comment" data-comment-id="${esc(c.id)}" title="Dismiss inline marker from diff view">Dismiss</button>
+            <button type="button" class="row-btn" data-action="edit-queued-comment" data-comment-id="${esc(c.id)}" title="Edit this queued review comment">Edit</button>
+            <button type="button" class="row-btn" data-action="send-single-queued-comment" data-comment-id="${esc(c.id)}" title="Send just this comment to the conversation now">Send Now</button>
+            <button type="button" class="row-btn danger" data-action="remove-queued-comment" data-comment-id="${esc(c.id)}" title="Remove from review batch">Remove</button>
           </div>
         </div>
         <div class="diff-staged-comment-body">${esc(c.text)}</div>
       </div>`;
+  }
+
+  function renderReviewBatchBar() {
+    const barEl = $('review-batch-bar');
+    if (!barEl) return;
+    const count = state.reviewComments.length;
+    if (count === 0) {
+      barEl.classList.add('hidden');
+      setHtmlIfChanged(barEl, '');
+      return;
+    }
+
+    const fileSet = new Set(state.reviewComments.map((c) => c.filePath));
+    const filesLabel = `${fileSet.size} file${fileSet.size === 1 ? '' : 's'}`;
+    barEl.classList.remove('hidden');
+    setHtmlIfChanged(
+      barEl,
+      `<div class="review-batch-left">
+        <span class="review-batch-badge">💬 ${count} Queued</span>
+        <span class="review-batch-info">Review comment${count === 1 ? '' : 's'} across ${esc(filesLabel)}</span>
+      </div>
+      <div class="review-batch-actions">
+        <button type="button" class="ghost-btn sm danger" data-action="clear-review-batch" ${state.sendingReview ? 'disabled' : ''}>Clear</button>
+        <button type="button" class="ghost-btn sm" data-action="open-review-modal" ${state.sendingReview ? 'disabled' : ''}>Review &amp; Summary…</button>
+        <button type="button" class="ghost-btn sm primary" data-action="submit-review-batch" ${state.sendingReview ? 'disabled' : ''}>${state.sendingReview ? 'Sending…' : `Send Review (${count})`}</button>
+      </div>`
+    );
+  }
+
+  function renderReviewModal() {
+    const modalEl = $('review-modal');
+    if (!modalEl) return;
+    if (!state.reviewModalOpen || state.reviewComments.length === 0) {
+      modalEl.classList.add('hidden');
+      setHtmlIfChanged(modalEl, '');
+      return;
+    }
+
+    const summaryInputEl = $('review-summary-input');
+    if (summaryInputEl) {
+      state.reviewSummaryNote = summaryInputEl.value;
+    }
+
+    const count = state.reviewComments.length;
+    const itemsHtml = state.reviewComments
+      .map(
+        (c, idx) => `
+        <div class="review-modal-item" data-modal-comment-id="${esc(c.id)}">
+          <div class="review-modal-item-top">
+            <div class="review-modal-item-title">
+              <span class="diff-staged-pill">#${idx + 1}</span>
+              <button type="button" class="diff-staged-uri-chip" data-action="jump-queued-comment" data-comment-id="${esc(c.id)}" title="Jump to ${esc(c.filePath)} (${esc(c.rangeLabel)}) in diff viewer">
+                <code>${esc(c.filePath)}</code> · ${esc(c.rangeLabel)} · ${esc(c.modeLabel)}
+              </button>
+            </div>
+            <div class="diff-staged-actions">
+              <button type="button" class="row-btn" data-action="copy-queued-pill" data-comment-id="${esc(c.id)}" title="Copy clickable Markdown diff pill">🔗 Pill</button>
+              <button type="button" class="row-btn danger" data-action="remove-queued-comment" data-comment-id="${esc(c.id)}" title="Remove comment">Remove</button>
+            </div>
+          </div>
+          ${c.quotePreview ? `<pre class="diff-comment-quote">${esc(c.quotePreview)}</pre>` : ''}
+          <div class="review-modal-item-comment">${esc(c.text)}</div>
+        </div>`
+      )
+      .join('');
+
+    modalEl.classList.remove('hidden');
+    setHtmlIfChanged(
+      modalEl,
+      `<div class="review-modal-card" role="document">
+        <div class="review-modal-header">
+          <div class="review-modal-title">
+            <span>Submit Diff Review (${count} comment${count === 1 ? '' : 's'})</span>
+          </div>
+          <button type="button" class="row-btn" data-action="close-review-modal" title="Close (Esc)">✕</button>
+        </div>
+        <div class="review-modal-body">
+          <label class="review-summary-label" for="review-summary-input">Overall Review Summary / Instructions (optional)</label>
+          <textarea
+            id="review-summary-input"
+            class="diff-comment-textarea"
+            rows="2"
+            placeholder="Optional summary note (e.g., Please address these review comments and update the unit tests)…"
+          >${esc(state.reviewSummaryNote || '')}</textarea>
+          <div class="review-modal-list">${itemsHtml}</div>
+        </div>
+        <div class="review-modal-footer">
+          <button type="button" class="ghost-btn sm" data-action="copy-review-markdown" title="Copy formatted Markdown review to clipboard">📋 Copy Markdown</button>
+          <div class="review-modal-footer-right">
+            <button type="button" class="ghost-btn sm" data-action="close-review-modal">Cancel</button>
+            <button type="button" class="ghost-btn sm primary" data-action="submit-review-batch" ${state.sendingReview ? 'disabled' : ''}>${state.sendingReview ? 'Sending…' : `Send Review to Chat (${count})`}</button>
+          </div>
+        </div>
+      </div>`
+    );
   }
 
   function isRowHighlightedByTarget(wt, filePath, ln) {
@@ -1257,17 +1415,22 @@
     const prefix = formatDiffRowPrefix(ln.type);
 
     const rowHtml = `<tr class="diff-line ${cls}${selectedCls}${targetCls}" data-diff-file="${esc(filePath)}" data-row-idx="${rowIdx}" data-old-no="${ln.oldNo ?? ''}" data-new-no="${ln.newNo ?? ''}" data-line-type="${esc(ln.type)}"><td class="line-num line-num-old" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range"><button type="button" class="line-comment-btn" data-comment-gutter="${rowIdx}" tabindex="-1" title="Comment on this diff line (Shift+Click for range)">+</button><span>${ln.oldNo ?? ''}</span></td><td class="line-num line-num-new" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range">${ln.newNo ?? ''}</td><td class="line-prefix">${prefix}</td><td class="line-code">${esc(ln.text)}</td></tr>`;
-    const stagedAtRow = state.stagedComments.filter(
-      (c) =>
-        wt &&
-        c.rootPath === wt.path &&
-        c.filePath === filePath &&
-        Math.max(c.startRowIdx, c.endRowIdx) === rowIdx
-    );
-    const stagedRowsHtml = stagedAtRow
+    const queuedAtRow = state.reviewComments
+      .map((c, idx) => ({ comment: c, idx }))
+      .filter(
+        ({ comment: c }) =>
+          wt &&
+          c.rootPath === wt.path &&
+          c.filePath === filePath &&
+          c.diffMode === state.diffMode &&
+          (c.commitSha || '') === (state.selectedCommit || '') &&
+          Math.max(c.startRowIdx, c.endRowIdx) === rowIdx &&
+          (!draft || draft.editingCommentId !== c.id)
+      );
+    const queuedRowsHtml = queuedAtRow
       .map(
-        (c) =>
-          `<tr class="diff-inline-widget-row"><td colspan="4">${renderStagedCommentCardHtml(c)}</td></tr>`
+        ({ comment: c, idx }) =>
+          `<tr class="diff-inline-widget-row"><td colspan="4">${renderQueuedCommentCardHtml(c, idx)}</td></tr>`
       )
       .join('');
 
@@ -1280,7 +1443,7 @@
       ? `<tr class="diff-inline-widget-row"><td colspan="4">${renderInlineCommentDraftCardHtml(filePath)}</td></tr>`
       : '';
 
-    return `${rowHtml}${stagedRowsHtml}${draftRowHtml}`;
+    return `${rowHtml}${queuedRowsHtml}${draftRowHtml}`;
   }
 
   function renderExpandedRange(filePath, fileRows, lines, newStart, oldStart, count) {
@@ -1536,12 +1699,12 @@
         const cardActions = [];
         const ds = f.dirtyState;
 
-        const fileStagedCommentsCount = state.stagedComments.filter(
+        const fileQueuedCommentsCount = state.reviewComments.filter(
           (c) => c.rootPath === wt.path && c.filePath === f.path
         ).length;
-        if (fileStagedCommentsCount > 0) {
+        if (fileQueuedCommentsCount > 0) {
           stateBadges.push(
-            `<span class="status-pill comment-count-pill" title="${fileStagedCommentsCount} comment(s) staged in Chat">${fileStagedCommentsCount} 💬</span>`
+            `<span class="status-pill comment-count-pill" title="${fileQueuedCommentsCount} comment(s) queued in Review Batch">${fileQueuedCommentsCount} 💬</span>`
           );
         }
 
@@ -1575,14 +1738,19 @@
 
         let bodyHtml = '';
         if (!collapsed) {
-          const fileLevelStagedHtml = state.stagedComments
+          const fileLevelQueuedHtml = state.reviewComments
+            .map((c, idx) => ({ comment: c, idx }))
             .filter(
-              (c) =>
+              ({ comment: c }) =>
                 c.rootPath === wt.path &&
                 c.filePath === f.path &&
-                c.startRowIdx < 0
+                c.diffMode === state.diffMode &&
+                (c.commitSha || '') === (state.selectedCommit || '') &&
+                c.startRowIdx < 0 &&
+                (!state.activeCommentDraft ||
+                  state.activeCommentDraft.editingCommentId !== c.id)
             )
-            .map((c) => renderStagedCommentCardHtml(c))
+            .map(({ comment: c, idx }) => renderQueuedCommentCardHtml(c, idx))
             .join('');
           const fileLevelDraftHtml =
             state.activeCommentDraft &&
@@ -1591,8 +1759,8 @@
               ? renderInlineCommentDraftCardHtml(f.path)
               : '';
           const fileTopWidgets =
-            fileLevelStagedHtml || fileLevelDraftHtml
-              ? `<div class="file-level-comment-wrap">${fileLevelStagedHtml}${fileLevelDraftHtml}</div>`
+            fileLevelQueuedHtml || fileLevelDraftHtml
+              ? `<div class="file-level-comment-wrap">${fileLevelQueuedHtml}${fileLevelDraftHtml}</div>`
               : '';
 
           if (f.isBinary) {
@@ -1658,6 +1826,8 @@
 
   function renderActiveWorkspace() {
     renderHeaderAndRoots();
+    renderReviewBatchBar();
+    renderReviewModal();
     const wt = getActiveRoot();
     if (!wt || !wt.existsOnDisk || !wt.isGitRepo) return;
     renderSourceControlPanel(wt);
@@ -2242,6 +2412,13 @@
 
   // Event Delegation
   document.addEventListener('click', async (e) => {
+    if (e.target === $('review-modal')) {
+      const summaryEl = $('review-summary-input');
+      if (summaryEl) state.reviewSummaryNote = summaryEl.value;
+      state.reviewModalOpen = false;
+      renderReviewModal();
+      return;
+    }
     if (e.target.closest('[data-line-gutter], [data-comment-gutter]')) {
       e.stopPropagation();
       return;
@@ -2269,8 +2446,12 @@
         openDiffCommentDraft(filePath, targetRowIdx, { extendRange: false });
         return;
       }
-      if (action === 'submit-diff-comment') {
-        submitActiveCommentDraft();
+      if (action === 'queue-diff-comment') {
+        queueActiveCommentDraft();
+        return;
+      }
+      if (action === 'send-diff-comment-now') {
+        await sendActiveCommentDraftNow();
         return;
       }
       if (action === 'cancel-diff-comment') {
@@ -2279,47 +2460,133 @@
         if (wt) renderDiffFiles(wt);
         return;
       }
-      if (action === 'dismiss-staged-comment') {
+      if (action === 'remove-queued-comment') {
         const id = actionBtn.dataset.commentId || '';
-        state.stagedComments = state.stagedComments.filter((c) => c.id !== id);
+        state.reviewComments = state.reviewComments.filter((c) => c.id !== id);
+        if (state.reviewComments.length === 0) {
+          state.reviewModalOpen = false;
+        }
         const wt = getActiveRoot();
         if (wt) renderDiffFiles(wt);
+        renderReviewBatchBar();
+        renderReviewModal();
         return;
       }
-      if (action === 'restage-diff-comment') {
+      if (action === 'edit-queued-comment') {
         const id = actionBtn.dataset.commentId || '';
-        const found = state.stagedComments.find((c) => c.id === id);
+        const found = state.reviewComments.find((c) => c.id === id);
         const wt = getActiveRoot();
         if (found && wt) {
-          const uri =
-            found.logicalUri ||
-            buildLogicalDiffUri(
-              wt,
-              found.filePath,
-              found.diffMode,
-              found.commitSha
-            );
-          const customUri =
-            found.customUri ||
-            buildCustomDiffUri(
-              wt,
-              found.filePath,
-              found.diffMode,
-              found.commitSha
-            );
-          postAddArtifactCommentToHost({
-            uri,
-            pageTitle: `${customUri} (${found.modeLabel} diff · ${found.rangeLabel})`,
-            comment: found.text,
-            selection: {
-              content: found.snippet,
-              ...(found.beforeText ? { beforeText: found.beforeText } : {}),
-              ...(found.afterText ? { afterText: found.afterText } : {}),
-              startLine: found.startLine ?? 1,
-              endLine: found.endLine ?? 1,
-            },
+          state.activeCommentDraft = {
+            filePath: found.filePath,
+            anchorRowIdx: found.startRowIdx,
+            startRowIdx: found.startRowIdx,
+            endRowIdx: found.endRowIdx,
+            text: found.text || '',
+            quotedText: '',
+            editingCommentId: found.id,
+          };
+          state.collapsedFiles.delete(found.filePath);
+          renderDiffFiles(wt);
+          focusCommentDraftTextarea();
+        }
+        return;
+      }
+      if (action === 'send-single-queued-comment') {
+        const id = actionBtn.dataset.commentId || '';
+        const found = state.reviewComments.find((c) => c.id === id);
+        if (found) {
+          await dispatchReviewComments([found], {
+            summaryNote: '',
+            clearFromQueueIds: [found.id],
           });
-          showToast(`Re-added ${customUri} to Chat`);
+        }
+        return;
+      }
+      if (action === 'copy-queued-pill') {
+        const id = actionBtn.dataset.commentId || '';
+        const found = state.reviewComments.find((c) => c.id === id);
+        if (found && found.markdownPill) {
+          await navigator.clipboard?.writeText(found.markdownPill);
+          showToast(`Copied diff pill for ${found.filePath} (${found.rangeLabel})`);
+        }
+        return;
+      }
+      if (action === 'clear-review-batch') {
+        state.reviewComments = [];
+        state.reviewSummaryNote = '';
+        state.reviewModalOpen = false;
+        const wt = getActiveRoot();
+        if (wt) renderDiffFiles(wt);
+        renderReviewBatchBar();
+        renderReviewModal();
+        showToast('Cleared review batch');
+        return;
+      }
+      if (action === 'open-review-modal') {
+        state.reviewModalOpen = true;
+        renderReviewModal();
+        setTimeout(() => {
+          $('review-summary-input')?.focus();
+        }, 15);
+        return;
+      }
+      if (action === 'close-review-modal') {
+        const summaryEl = $('review-summary-input');
+        if (summaryEl) state.reviewSummaryNote = summaryEl.value;
+        state.reviewModalOpen = false;
+        renderReviewModal();
+        return;
+      }
+      if (action === 'submit-review-batch') {
+        const summaryEl = $('review-summary-input');
+        if (summaryEl) state.reviewSummaryNote = summaryEl.value;
+        const ids = state.reviewComments.map((c) => c.id);
+        await dispatchReviewComments(state.reviewComments, {
+          summaryNote: state.reviewSummaryNote,
+          clearFromQueueIds: ids,
+        });
+        return;
+      }
+      if (action === 'copy-review-markdown') {
+        const summaryEl = $('review-summary-input');
+        if (summaryEl) state.reviewSummaryNote = summaryEl.value;
+        const wt = getActiveRoot();
+        try {
+          const res = await apiPost('/api/send-review', {
+            conversationId: state.conversationId || resolveConversationId(),
+            repositoryName: wt?.name || wt?.displayName || '',
+            repositoryPath: wt?.path || '',
+            summaryNote: state.reviewSummaryNote,
+            comments: state.reviewComments,
+            dryRun: true,
+          });
+          if (res.markdown) {
+            await navigator.clipboard?.writeText(res.markdown);
+            showToast('Copied formatted Markdown review to clipboard');
+          }
+        } catch (err) {
+          showToast(`Copy failed: ${err.message}`);
+        }
+        return;
+      }
+      if (action === 'jump-queued-comment') {
+        const id = actionBtn.dataset.commentId || '';
+        const found = state.reviewComments.find((c) => c.id === id);
+        if (found) {
+          state.reviewModalOpen = false;
+          renderReviewModal();
+          const lineRange = parseDiffLineRangeSpec(found.urlRangeSpec || '');
+          state.pendingDeepLink = {
+            repo: found.repoName || found.rootPath,
+            hasExplicitRev: true,
+            rev: found.commitSha || found.diffMode || 'working',
+            mode: found.diffMode || 'working',
+            commit: found.commitSha || '',
+            file: found.filePath,
+            lineRange,
+          };
+          await applyPendingDeepLink();
         }
         return;
       }
@@ -2560,13 +2827,21 @@
     if (e.target && e.target.id === 'diff-comment-input' && state.activeCommentDraft) {
       state.activeCommentDraft.text = e.target.value;
     }
+    if (e.target && e.target.id === 'review-summary-input') {
+      state.reviewSummaryNote = e.target.value;
+    }
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.target && e.target.id === 'diff-comment-input') {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
-        submitActiveCommentDraft();
+        sendActiveCommentDraftNow();
+        return;
+      }
+      if (e.altKey && e.key === 'Enter') {
+        e.preventDefault();
+        queueActiveCommentDraft();
         return;
       }
       if (e.key === 'Escape') {
@@ -2576,6 +2851,29 @@
         if (wt) renderDiffFiles(wt);
         return;
       }
+    }
+    if (state.reviewModalOpen && e.key === 'Escape') {
+      e.preventDefault();
+      const summaryEl = $('review-summary-input');
+      if (summaryEl) state.reviewSummaryNote = summaryEl.value;
+      state.reviewModalOpen = false;
+      renderReviewModal();
+      return;
+    }
+    if (
+      state.reviewModalOpen &&
+      e.target &&
+      e.target.id === 'review-summary-input' &&
+      (e.ctrlKey || e.metaKey) &&
+      e.key === 'Enter'
+    ) {
+      e.preventDefault();
+      state.reviewSummaryNote = e.target.value;
+      const ids = state.reviewComments.map((c) => c.id);
+      dispatchReviewComments(state.reviewComments, {
+        summaryNote: state.reviewSummaryNote,
+        clearFromQueueIds: ids,
+      });
     }
   });
 
@@ -2646,6 +2944,8 @@
   async function refreshIfActive({ silent = true, minIntervalMs = 0 } = {}) {
     if (
       state.committing ||
+      state.sendingReview ||
+      state.reviewModalOpen ||
       state.discardPrompt ||
       state.activeCommentDraft ||
       state.draggingCommentRange ||
@@ -2717,6 +3017,8 @@
       if (
         !document.hidden &&
         !state.committing &&
+        !state.sendingReview &&
+        !state.reviewModalOpen &&
         !state.discardPrompt &&
         !state.activeCommentDraft &&
         !state.draggingCommentRange &&

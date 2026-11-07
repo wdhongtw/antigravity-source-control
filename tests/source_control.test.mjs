@@ -16,6 +16,7 @@ import {
   commitRepositoryChanges,
   discardChanges,
   formatDiffAnchorLink,
+  formatDiffReviewMessage,
   getLogicalDiffContext,
   getRepositoryDiff,
   getRepositoryFileLines,
@@ -34,6 +35,7 @@ import {
   getSessionRepoState,
   normalizeRepoPath,
 } from '../lib/session_repos.mjs';
+import { sendConversationMessage } from '../lib/sidecar_http.mjs';
 import { handleToolCall } from '../mcp/git_mcp.mjs';
 
 const tests = [];
@@ -605,6 +607,98 @@ test('parseDiffLineRange, parseDiffAnchorUri, formatDiffAnchorLink, and git_diff
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test('formatDiffReviewMessage and sendConversationMessage synthesize and dispatch structured review messages', async () => {
+  // 1. Single inline comment review message
+  const singleRes = formatDiffReviewMessage({
+    repositoryName: 'sc-demo-feature',
+    comments: [
+      {
+        filePath: 'src/pipeline.js',
+        diffMode: 'unstaged',
+        urlRangeSpec: '+L38-L40',
+        rangeLabel: '+L38-L40',
+        hunkHeader: '@@ -34,4 +37,6 @@',
+        snippet:
+          '   36   37 |   for (const stage of stages) {\n>       38 | +    if (!payload) throw new TypeError("null");',
+        text: 'Use ValidationError instead of TypeError here.',
+      },
+    ],
+  });
+  assert.equal(singleRes.commentCount, 1);
+  assert.equal(singleRes.fileCount, 1);
+  assert.equal(singleRes.title, 'Diff Review: src/pipeline.js (+L38-L40)');
+  assert.ok(
+    singleRes.markdown.includes(
+      '[`src/pipeline.js` (unstaged · +L38-L40)](sidecar://source-control/git_ui/?repo=sc-demo-feature&rev=unstaged&file=src%2Fpipeline.js&lines=L38-L40&auto_open=false)'
+    )
+  );
+  assert.ok(singleRes.markdown.includes('```diff\n@@ -34,4 +37,6 @@'));
+  assert.ok(
+    singleRes.markdown.includes(
+      '**Comment:** Use ValidationError instead of TypeError here.'
+    )
+  );
+
+  // 2. Multi-comment review batch with overall summary note
+  const batchRes = formatDiffReviewMessage({
+    repositoryName: 'sc-demo-feature',
+    summaryNote: 'Please address both comments and run unit tests.',
+    comments: [
+      {
+        filePath: 'src/pipeline.js',
+        diffMode: 'unstaged',
+        urlRangeSpec: '+L38',
+        rangeLabel: '+L38',
+        hunkHeader: '@@ -34,4 +37,6 @@',
+        snippet: '>       38 | +    if (!payload) throw new TypeError("null");',
+        text: 'Use ValidationError.',
+      },
+      {
+        filePath: 'src/engine.js',
+        diffMode: 'staged',
+        urlRangeSpec: '+L14-L15',
+        rangeLabel: '-L14 / +L14-L15',
+        hunkHeader: '@@ -12,4 +12,6 @@',
+        snippet:
+          '>  14      | -  const timeout = 5000;\n>       14 | +  const timeout = 15000;',
+        text: 'Keep default timeout at 5000.',
+      },
+    ],
+  });
+  assert.equal(batchRes.commentCount, 2);
+  assert.equal(batchRes.fileCount, 2);
+  assert.equal(batchRes.title, 'Diff Review (2 comments across 2 files)');
+  assert.ok(
+    batchRes.markdown.includes('Please address both comments and run unit tests.')
+  );
+  assert.ok(batchRes.markdown.includes('1. [`src/pipeline.js`'));
+  assert.ok(batchRes.markdown.includes('2. [`src/engine.js`'));
+  assert.ok(batchRes.markdown.includes('`-L14 / +L14-L15`'));
+
+  // 3. Dispatch via sendConversationMessage with mock execAgentApi
+  const capturedCalls = [];
+  const sendRes = await sendConversationMessage(
+    'conv-review-123',
+    batchRes.markdown,
+    {
+      title: batchRes.title,
+      execAgentApi: async (args) => {
+        capturedCalls.push(args);
+        return { ok: true };
+      },
+    }
+  );
+  assert.equal(sendRes.ok, true);
+  assert.equal(capturedCalls.length, 1);
+  assert.deepEqual(capturedCalls[0], [
+    'send-message',
+    '--title',
+    'Diff Review (2 comments across 2 files)',
+    'conv-review-123',
+    batchRes.markdown,
+  ]);
 });
 
 let failed = 0;
