@@ -23,6 +23,23 @@ commit stack inspector from `worktree-inspector`.
   - `git_list`: List all Git repositories and worktrees tracked in the current
     session trajectory (including any inherited from a forked parent
     conversation).
+  - `git_diff_context`: Resolve a logical diff anchor URI
+    (`sidecar://source-control/git_ui/?...` or
+    `git-diff://<repo>.local/<rev>/<file>`) or explicit
+    `repo`/`rev`/`file`/`lines` parameters into line-numbered diff hunks,
+    surrounding file lines, the exact raw `git` command, and a clickable
+    `sidecar://source-control/git_ui/?...` Markdown pill.
+- **Clickable Logical Diff Mentions & Inline Diff Review Commenting**:
+  - Cite logical diffs in chat and Markdown artifacts as
+    ``[`<file>` (<rev> · <lines>)](sidecar://source-control/git_ui/?repo=<repo>&rev=<rev>&file=<file>&lines=<lines>&auto_open=false)``
+    to jump directly into the Source Control AuxPane at the target repository,
+    diff mode/commit, file, and highlighted line range (with automatic
+    collapsed-gap expansion).
+  - Select single or multi-line ranges in the diff table to stage native
+    `add-artifact-comment` review comments
+    (`git-diff://<repo>.local/<rev>/<file>`) into the host Chat input box, or
+    click **🔗 Link** / **🔗 Copy Pill** to copy a clickable
+    `sidecar://source-control/git_ui/?...` Markdown pill.
 - **Client-Side Session Fork Inheritance**:
   - Registered repositories and worktrees are stored as
     `CORTEX_STEP_TYPE_MCP_TOOL` / `CORTEX_STEP_TYPE_GENERIC` steps in

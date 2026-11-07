@@ -1134,6 +1134,25 @@ body {
   box-shadow: inset 3px 0 0 var(--primary, #3b82f6);
 }
 
+.diff-line.target-highlighted-line {
+  background: color-mix(in srgb, #f59e0b 20%, var(--card, #1c1c21));
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.diff-line.target-highlighted-line .line-num {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+:root[data-theme="light"] .diff-line.target-highlighted-line {
+  background: color-mix(in srgb, #f59e0b 18%, var(--card, #ffffff));
+  box-shadow: inset 3px 0 0 #d97706;
+}
+
+:root[data-theme="light"] .diff-line.target-highlighted-line .line-num {
+  color: #b45309;
+}
+
 .line-num {
   position: relative;
   width: 38px;

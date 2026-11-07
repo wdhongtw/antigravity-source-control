@@ -48,6 +48,10 @@
     stagedComments: [],
     // Drag selection state on line numbers
     draggingCommentRange: null, // { filePath, anchorRowIdx } | null
+    // Deep-link target from `sidecar://source-control/git_ui/?repo=...&rev=...&file=...&lines=...`
+    pendingDeepLink: null, // { repo, rev, mode, commit, file, lineRange } | null
+    // Highlighted diff target after jumping via a deep link
+    highlightedTarget: null, // { rootPath, diffMode, commitSha, filePath, side, startLine, endLine } | null
   };
 
   function esc(str) {
@@ -733,8 +737,194 @@
     return `file:///git-diff/${repoSlug}.local/${revSlug}/${cleanRelPath}`;
   }
 
-  function buildGitDiffProvenanceHeader(wt, filePath, hunkHeader = '', diffMode = state.diffMode, commitSha = state.selectedCommit) {
+  function normalizeDiffRevParam({ rev = '', mode = '', commit = '' } = {}) {
+    const rawCommit = String(commit || '')
+      .trim()
+      .replace(/^commit-/i, '');
+    if (/^[0-9a-f]{6,40}$/i.test(rawCommit)) {
+      return {
+        rev: rawCommit,
+        mode: 'branch',
+        commit: rawCommit,
+        label: rawCommit.slice(0, 7),
+      };
+    }
+    const rawToken = String(rev || mode || 'working')
+      .trim()
+      .toLowerCase();
+    const commitMatch = /^commit-([0-9a-f]{6,40})$/i.exec(rawToken);
+    if (commitMatch) {
+      const sha = commitMatch[1];
+      return { rev: sha, mode: 'branch', commit: sha, label: sha.slice(0, 7) };
+    }
+    if (/^[0-9a-f]{6,40}$/i.test(rawToken)) {
+      return {
+        rev: rawToken,
+        mode: 'branch',
+        commit: rawToken,
+        label: rawToken.slice(0, 7),
+      };
+    }
+    switch (rawToken) {
+      case 'staged':
+      case 'staged-index':
+        return { rev: 'staged', mode: 'staged', commit: '', label: 'staged' };
+      case 'unstaged':
+      case 'unstaged-worktree':
+        return {
+          rev: 'unstaged',
+          mode: 'unstaged',
+          commit: '',
+          label: 'unstaged',
+        };
+      case 'all':
+      case 'all-vs-base':
+        return { rev: 'all', mode: 'all', commit: '', label: 'all' };
+      case 'branch':
+      case 'branch-commits':
+        return { rev: 'branch', mode: 'branch', commit: '', label: 'branch' };
+      case 'working':
+      case 'working-tree':
+      case 'dirty':
+      default:
+        return {
+          rev: 'working',
+          mode: 'working',
+          commit: '',
+          label: 'working',
+        };
+    }
+  }
+
+  function parseDiffLineRangeSpec(rawLines) {
+    if (rawLines === null || rawLines === undefined) return null;
+    const cleaned = String(rawLines).trim();
+    if (!cleaned) return null;
+    const m =
+      /^([+-])?[Ll]?(\d+)(?:\s*(?:-[+-]?[Ll]?|\.\.|–)(\d+))?$/.exec(cleaned);
+    if (!m) return null;
+    const side = m[1] === '-' ? 'old' : 'new';
+    const a = Number.parseInt(m[2], 10);
+    const b = m[3] !== undefined ? Number.parseInt(m[3], 10) : a;
+    if (!Number.isFinite(a) || a <= 0) return null;
+    const startLine = Math.min(a, b);
+    const endLine = Math.max(a, b);
+    const sign = side === 'old' ? '-' : '+';
+    const urlPrefix = side === 'old' ? '-L' : 'L';
+    const urlParam =
+      startLine === endLine
+        ? `${urlPrefix}${startLine}`
+        : `${urlPrefix}${startLine}-L${endLine}`;
+    const displayLabel =
+      startLine === endLine
+        ? `${sign}L${startLine}`
+        : `${sign}L${startLine}-L${endLine}`;
+    return { side, startLine, endLine, urlParam, displayLabel };
+  }
+
+  function buildSidecarDiffLink(
+    wt,
+    filePath = '',
+    linesSpec = '',
+    diffMode = state.diffMode,
+    commitSha = state.selectedCommit
+  ) {
+    const repoName = (wt?.name || wt?.displayName || 'repo').replace(
+      /\.local$/i,
+      ''
+    );
+    const revSpec = normalizeDiffRevParam({
+      mode: diffMode,
+      commit: commitSha,
+    });
+    const cleanFile = String(filePath || '').trim().replace(/^\/+/, '');
+    const lineRange = parseDiffLineRangeSpec(linesSpec);
+
+    const params = new URLSearchParams();
+    if (repoName) params.set('repo', repoName);
+    if (revSpec.rev) params.set('rev', revSpec.rev);
+    if (cleanFile) params.set('file', cleanFile);
+    if (lineRange) params.set('lines', lineRange.urlParam);
+    params.set('auto_open', 'false');
+
+    const sidecarUri = `sidecar://source-control/git_ui/?${params.toString()}`;
+    const metaParts = [revSpec.label];
+    if (lineRange) metaParts.push(lineRange.displayLabel);
+    const suffix = metaParts.length > 0 ? ` (${metaParts.join(' · ')})` : '';
+    const pillLabel = cleanFile
+      ? `\`${cleanFile}\`${suffix}`
+      : `${repoName}${suffix}`;
+
+    return {
+      sidecarUri,
+      markdownPill: `[${pillLabel}](${sidecarUri})`,
+      lineRange,
+    };
+  }
+
+  function parseDeepLinkFromSearch(searchStr, hashStr = '') {
+    const params = new URLSearchParams(searchStr || '');
+    const hasTargetParam = [
+      'repo',
+      'path',
+      'root',
+      'rev',
+      'mode',
+      'commit',
+      'file',
+      'lines',
+      'line',
+    ].some((k) => params.has(k));
+    if (!hasTargetParam) return null;
+
+    const repo = (
+      params.get('repo') ||
+      params.get('path') ||
+      params.get('root') ||
+      ''
+    )
+      .trim()
+      .replace(/\.local$/i, '');
+    const hasExplicitRev =
+      params.has('rev') || params.has('mode') || params.has('commit');
+    const revSpec = normalizeDiffRevParam({
+      rev: params.get('rev') || '',
+      mode: params.get('mode') || '',
+      commit: params.get('commit') || '',
+    });
+    const file = (params.get('file') || '').trim().replace(/^\/+/, '');
+    const rawLines =
+      params.get('lines') ||
+      params.get('line') ||
+      String(hashStr || '').replace(/^#/, '') ||
+      '';
+    const lineRange = parseDiffLineRangeSpec(rawLines);
+
+    return {
+      repo,
+      hasExplicitRev,
+      ...revSpec,
+      file,
+      lineRange,
+    };
+  }
+
+  function buildGitDiffProvenanceHeader(
+    wt,
+    filePath,
+    hunkHeader = '',
+    diffMode = state.diffMode,
+    commitSha = state.selectedCommit,
+    linesSpec = ''
+  ) {
     const customUri = buildCustomDiffUri(wt, filePath, diffMode, commitSha);
+    const { sidecarUri } = buildSidecarDiffLink(
+      wt,
+      filePath,
+      linesSpec,
+      diffMode,
+      commitSha
+    );
     let gitCmd = `git diff HEAD -- ${filePath}`;
     if (commitSha) {
       gitCmd = `git show ${commitSha} -- ${filePath}`;
@@ -748,7 +938,7 @@
       gitCmd = `git diff ${wt.baseRef || 'HEAD'}...HEAD -- ${filePath}`;
     }
     const hunkPart = hunkHeader ? ` · ${hunkHeader}` : '';
-    return `[Logical Git diff · URI: ${customUri} · repo: ${wt.path} · \`${gitCmd}\`${hunkPart}]`;
+    return `[Logical Git diff · URI: ${customUri} · anchor: ${sidecarUri} · repo: ${wt.path} · \`${gitCmd}\`${hunkPart}]`;
   }
 
   function computeCommentSelectionMeta(filePath, startRowIdx, endRowIdx, quotedText = '', wt = getActiveRoot()) {
@@ -761,6 +951,7 @@
         quotedText.trim() || `[File diff review on ${filePath}]`;
       return {
         rangeLabel: 'File-level diff comment',
+        urlRangeSpec: '',
         startLine: 1,
         endLine: 1,
         content: fallbackContent,
@@ -773,9 +964,6 @@
     const hi = Math.min(rows.length - 1, Math.max(startRowIdx, endRowIdx));
     const selectedRows = rows.slice(lo, hi + 1);
     const hunkHeader = selectedRows[0]?.hunkHeader || '';
-    const fullProvenance = wt
-      ? buildGitDiffProvenanceHeader(wt, filePath, hunkHeader)
-      : '';
 
     const newNos = selectedRows
       .map((r) => r.newNo)
@@ -786,13 +974,33 @@
 
     let startLine = 1;
     let endLine = 1;
+    let urlRangeSpec = '';
     if (newNos.length > 0) {
       startLine = Math.min(...newNos);
       endLine = Math.max(...newNos);
+      urlRangeSpec =
+        startLine === endLine
+          ? `+L${startLine}`
+          : `+L${startLine}-L${endLine}`;
     } else if (oldNos.length > 0) {
       startLine = Math.min(...oldNos);
       endLine = Math.max(...oldNos);
+      urlRangeSpec =
+        startLine === endLine
+          ? `-L${startLine}`
+          : `-L${startLine}-L${endLine}`;
     }
+
+    const fullProvenance = wt
+      ? buildGitDiffProvenanceHeader(
+          wt,
+          filePath,
+          hunkHeader,
+          state.diffMode,
+          state.selectedCommit,
+          urlRangeSpec
+        )
+      : '';
 
     const rangeParts = [];
     if (oldNos.length > 0) {
@@ -835,6 +1043,7 @@
 
     return {
       rangeLabel,
+      urlRangeSpec,
       startLine,
       endLine: Math.max(startLine, endLine),
       content,
@@ -965,6 +1174,7 @@
             <span class="diff-comment-badge">Review Comment</span>
             <span class="diff-comment-target"><code>${esc(customUri)}</code> · <strong>${esc(meta.rangeLabel)}</strong></span>
             <span class="diff-comment-mode-pill">${esc(modeLabel)}</span>
+            <button type="button" class="row-btn" data-action="copy-comment-diff-link" title="Copy clickable Markdown diff pill for this line range">🔗 Copy Pill</button>
           </div>
           <span class="diff-comment-hint">Shift+Click or drag line numbers to select range</span>
         </div>
@@ -1004,7 +1214,29 @@
       </div>`;
   }
 
+  function isRowHighlightedByTarget(wt, filePath, ln) {
+    const t = state.highlightedTarget;
+    if (!t || !wt) return false;
+    if (
+      t.rootPath !== wt.path ||
+      t.filePath !== filePath ||
+      t.diffMode !== state.diffMode ||
+      (t.commitSha || '') !== (state.selectedCommit || '')
+    ) {
+      return false;
+    }
+    if (!Number.isInteger(t.startLine) || !Number.isInteger(t.endLine)) {
+      return false;
+    }
+    const lineNo = t.side === 'old' ? ln.oldNo : (ln.newNo ?? ln.oldNo);
+    if (!Number.isInteger(lineNo)) return false;
+    if (t.side === 'old' && ln.oldNo === null) return false;
+    if (t.side !== 'old' && ln.newNo === null && ln.type === 'del') return false;
+    return lineNo >= t.startLine && lineNo <= t.endLine;
+  }
+
   function renderDiffRow(filePath, ln, rowIdx, extraCls = '') {
+    const wt = getActiveRoot();
     const draft = state.activeCommentDraft;
     const isSelectedForComment =
       draft &&
@@ -1012,6 +1244,7 @@
       draft.startRowIdx >= 0 &&
       rowIdx >= Math.min(draft.startRowIdx, draft.endRowIdx) &&
       rowIdx <= Math.max(draft.startRowIdx, draft.endRowIdx);
+    const isTargetHighlighted = isRowHighlightedByTarget(wt, filePath, ln);
 
     const cls =
       ln.type === 'add'
@@ -1020,11 +1253,10 @@
         ? 'line-del'
         : `line-ctx${extraCls ? ` ${extraCls}` : ''}`;
     const selectedCls = isSelectedForComment ? ' selected-for-comment' : '';
+    const targetCls = isTargetHighlighted ? ' target-highlighted-line' : '';
     const prefix = formatDiffRowPrefix(ln.type);
 
-    const rowHtml = `<tr class="diff-line ${cls}${selectedCls}" data-diff-file="${esc(filePath)}" data-row-idx="${rowIdx}" data-old-no="${ln.oldNo ?? ''}" data-new-no="${ln.newNo ?? ''}" data-line-type="${esc(ln.type)}"><td class="line-num line-num-old" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range"><button type="button" class="line-comment-btn" data-comment-gutter="${rowIdx}" tabindex="-1" title="Comment on this diff line (Shift+Click for range)">+</button><span>${ln.oldNo ?? ''}</span></td><td class="line-num line-num-new" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range">${ln.newNo ?? ''}</td><td class="line-prefix">${prefix}</td><td class="line-code">${esc(ln.text)}</td></tr>`;
-
-    const wt = getActiveRoot();
+    const rowHtml = `<tr class="diff-line ${cls}${selectedCls}${targetCls}" data-diff-file="${esc(filePath)}" data-row-idx="${rowIdx}" data-old-no="${ln.oldNo ?? ''}" data-new-no="${ln.newNo ?? ''}" data-line-type="${esc(ln.type)}"><td class="line-num line-num-old" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range"><button type="button" class="line-comment-btn" data-comment-gutter="${rowIdx}" tabindex="-1" title="Comment on this diff line (Shift+Click for range)">+</button><span>${ln.oldNo ?? ''}</span></td><td class="line-num line-num-new" data-line-gutter="${rowIdx}" title="Click to comment · Shift+Click or drag for multi-line range">${ln.newNo ?? ''}</td><td class="line-prefix">${prefix}</td><td class="line-code">${esc(ln.text)}</td></tr>`;
     const stagedAtRow = state.stagedComments.filter(
       (c) =>
         wt &&
@@ -1411,6 +1643,7 @@
                 <span class="stat-del">-${f.deletions}</span>
                 ${cardActions.join('')}
                 <button type="button" class="row-btn comment-btn" data-action="comment-file" data-file="${esc(f.path)}" title="Add a review comment on this file diff to Chat">💬 Comment</button>
+                <button type="button" class="row-btn" data-action="copy-diff-link" data-file="${esc(f.path)}" title="Copy clickable Markdown diff pill for this file">🔗 Link</button>
                 <button type="button" class="row-btn" data-action="copy-path" data-path="${esc(f.path)}" title="Copy relative path">Copy</button>
                 <button type="button" class="row-btn" data-action="open-file" data-path="${esc(fullFilePath)}" title="Open in native File Preview">Open</button>
               </div>
@@ -1508,6 +1741,7 @@
       state.selectedCommit = '';
       state.discardPrompt = null;
       state.activeCommentDraft = null;
+      state.highlightedTarget = null;
       hideSelectionQuotePill();
       state.collapsedFiles.clear();
       state.gapExpansions.clear();
@@ -1515,6 +1749,200 @@
     }
     renderActiveWorkspace();
     await loadDiffForSelected({ silent: false });
+  }
+
+  function resolveDeepLinkRoot(repoQuery) {
+    const raw = String(repoQuery || '')
+      .trim()
+      .replace(/\.local$/i, '')
+      .replace(/\/+$/, '');
+    if (!raw) return null;
+    const lower = raw.toLowerCase();
+
+    for (const r of state.roots) {
+      if (r.path === raw) return r;
+      const base = (r.path.split('/').pop() || '').toLowerCase();
+      const name = String(r.name || '').toLowerCase();
+      const display = String(r.displayName || '').toLowerCase();
+      const label = String(r.label || '').toLowerCase();
+      if (
+        base === lower ||
+        name === lower ||
+        display === lower ||
+        (label && label === lower)
+      ) {
+        return r;
+      }
+    }
+    for (const r of state.roots) {
+      if (r.path.toLowerCase().endsWith(`/${lower}`)) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  function findFileInDiffData(targetFile) {
+    if (!targetFile) return null;
+    const files = state.diffData?.files || [];
+    const exact = files.find(
+      (f) => f.path === targetFile || f.oldPath === targetFile
+    );
+    if (exact) return exact;
+    return (
+      files.find((f) => f.path.endsWith(`/${targetFile}`)) || null
+    );
+  }
+
+  function isLinePresentInHunks(fileObj, lineRange) {
+    if (!fileObj || !lineRange) return true;
+    for (const h of fileObj.hunks || []) {
+      for (const l of h.lines || []) {
+        const lineNo =
+          lineRange.side === 'old' ? l.oldNo : (l.newNo ?? l.oldNo);
+        if (
+          Number.isInteger(lineNo) &&
+          lineNo >= lineRange.startLine &&
+          lineNo <= lineRange.endLine &&
+          (lineRange.side === 'old' ? l.oldNo !== null : l.newNo !== null)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function ensureTargetLineGapExpanded(wt, fileObj, lineRange) {
+    if (!wt || !fileObj || !lineRange || isLinePresentInHunks(fileObj, lineRange)) {
+      return false;
+    }
+    try {
+      const fileInfo = await ensureFileLines(wt, fileObj);
+      if (!fileInfo || !fileInfo.totalLines) return false;
+      const hunks = fileObj.hunks || [];
+      let expandedAny = false;
+      for (let gapIdx = 0; gapIdx <= hunks.length; gapIdx++) {
+        const bounds = computeGapBounds(fileObj, gapIdx, fileInfo);
+        if (!bounds || !bounds.gapSize || bounds.gapSize <= 0) continue;
+        const { gapNewStart, gapOldStart, gapSize } = bounds;
+        const gapStart = lineRange.side === 'old' ? gapOldStart : gapNewStart;
+        const gapEnd = gapStart + gapSize - 1;
+        if (lineRange.endLine >= gapStart && lineRange.startLine <= gapEnd) {
+          const exp = getGapExpansion(fileObj.path, gapIdx);
+          if (gapIdx === 0) {
+            const neededFromEnd = Math.min(
+              gapSize,
+              gapEnd - Math.max(gapStart, lineRange.startLine - 4) + 1
+            );
+            exp.fromEnd = Math.max(exp.fromEnd, neededFromEnd);
+          } else {
+            const neededFromStart = Math.min(
+              gapSize,
+              Math.min(gapEnd, lineRange.endLine + 4) - gapStart + 1
+            );
+            exp.fromStart = Math.max(exp.fromStart, neededFromStart);
+          }
+          expandedAny = true;
+        }
+      }
+      return expandedAny;
+    } catch {
+      return false;
+    }
+  }
+
+  async function applyPendingDeepLink() {
+    const dl = state.pendingDeepLink;
+    if (!dl || state.roots.length === 0) return false;
+    state.pendingDeepLink = null;
+
+    const matchedRoot = dl.repo ? resolveDeepLinkRoot(dl.repo) : getActiveRoot();
+    if (matchedRoot) {
+      state.selectedRootPath = matchedRoot.path;
+    } else if (!state.selectedRootPath) {
+      state.selectedRootPath = state.roots[0].path;
+    }
+
+    state.diffMode = dl.mode || 'working';
+    state.selectedCommit = dl.commit || '';
+    state.activeCommentDraft = null;
+    hideSelectionQuotePill();
+    state.gapExpansions.clear();
+
+    if (dl.file && state.fileFilter) {
+      const filterLower = state.fileFilter.trim().toLowerCase();
+      if (!dl.file.toLowerCase().includes(filterLower)) {
+        state.fileFilter = '';
+        if ($('file-filter')) $('file-filter').value = '';
+      }
+    }
+
+    await loadDiffForSelected({ silent: false });
+
+    const wt = getActiveRoot();
+    if (!wt) return true;
+
+    // Snap commit prefix to exact short SHA in commits list so the active commit row highlights
+    if (state.selectedCommit && Array.isArray(state.diffData?.commits)) {
+      const commitLower = state.selectedCommit.toLowerCase();
+      const matchedCommit = state.diffData.commits.find(
+        (c) =>
+          c.sha.toLowerCase().startsWith(commitLower) ||
+          commitLower.startsWith(c.sha.toLowerCase())
+      );
+      if (matchedCommit && matchedCommit.sha !== state.selectedCommit) {
+        state.selectedCommit = matchedCommit.sha;
+      }
+    }
+
+    let fileObj = findFileInDiffData(dl.file);
+    // If no explicit `rev`/`mode` was provided in the link and the file is not in `working`,
+    // fallback to `all` (`All vs Base`) so committed branch changes are still found.
+    if (!fileObj && dl.file && !dl.hasExplicitRev && state.diffMode === 'working') {
+      state.diffMode = 'all';
+      await loadDiffForSelected({ silent: false });
+      fileObj = findFileInDiffData(dl.file);
+    }
+
+    if (fileObj) {
+      state.collapsedFiles.delete(fileObj.path);
+      state.selectedChangeFile = fileObj.path;
+      if (dl.lineRange) {
+        await ensureTargetLineGapExpanded(wt, fileObj, dl.lineRange);
+        state.highlightedTarget = {
+          rootPath: wt.path,
+          diffMode: state.diffMode,
+          commitSha: state.selectedCommit,
+          filePath: fileObj.path,
+          side: dl.lineRange.side,
+          startLine: dl.lineRange.startLine,
+          endLine: dl.lineRange.endLine,
+        };
+      } else {
+        state.highlightedTarget = null;
+      }
+      renderActiveWorkspace();
+
+      requestAnimationFrame(() => {
+        const cardEl = document.querySelector(
+          `[data-file-card="${CSS.escape(fileObj.path)}"]`
+        );
+        const lineEl =
+          cardEl?.querySelector('tr.target-highlighted-line') || cardEl;
+        lineEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+
+      const toastSuffix = dl.lineRange ? ` (${dl.lineRange.displayLabel})` : '';
+      showToast(`Jumped to ${fileObj.path}${toastSuffix}`);
+    } else {
+      renderActiveWorkspace();
+      if (dl.file) {
+        showToast(`Opened ${wt.displayName || wt.name} (${dl.file} not in ${state.diffMode} diff)`);
+      }
+    }
+
+    return true;
   }
 
   async function refreshAll({ silent = false } = {}) {
@@ -1547,12 +1975,18 @@
         return;
       }
 
+      if (state.pendingDeepLink) {
+        await applyPendingDeepLink();
+        return;
+      }
+
       if (!state.roots.some((r) => r.path === state.selectedRootPath)) {
         state.selectedRootPath = state.roots[0].path;
         state.selectedChangeFile = '';
         state.selectedCommit = '';
         state.discardPrompt = null;
         state.activeCommentDraft = null;
+        state.highlightedTarget = null;
         hideSelectionQuotePill();
         state.collapsedFiles.clear();
         state.gapExpansions.clear();
@@ -1889,6 +2323,39 @@
         }
         return;
       }
+      if (action === 'copy-diff-link') {
+        const filePath = actionBtn.dataset.file || '';
+        const wt = getActiveRoot();
+        if (wt && filePath) {
+          const { markdownPill } = buildSidecarDiffLink(wt, filePath, '');
+          await navigator.clipboard?.writeText(markdownPill);
+          showToast(`Copied diff pill for ${filePath}`);
+        }
+        return;
+      }
+      if (action === 'copy-comment-diff-link') {
+        const draft = state.activeCommentDraft;
+        const wt = getActiveRoot();
+        if (wt && draft) {
+          const meta = computeCommentSelectionMeta(
+            draft.filePath,
+            draft.startRowIdx,
+            draft.endRowIdx,
+            draft.quotedText || '',
+            wt
+          );
+          const { markdownPill } = buildSidecarDiffLink(
+            wt,
+            draft.filePath,
+            meta.urlRangeSpec || ''
+          );
+          await navigator.clipboard?.writeText(markdownPill);
+          showToast(
+            `Copied diff pill for ${draft.filePath} (${meta.rangeLabel})`
+          );
+        }
+        return;
+      }
       if (action === 'copy-root-path' || action === 'copy-path') {
         const p = actionBtn.dataset.path || '';
         if (p) {
@@ -2048,6 +2515,7 @@
       state.diffMode = modeBtn.dataset.mode;
       state.selectedCommit = '';
       state.activeCommentDraft = null;
+      state.highlightedTarget = null;
       hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
@@ -2058,6 +2526,7 @@
     if (clearCommitBtn) {
       state.selectedCommit = '';
       state.activeCommentDraft = null;
+      state.highlightedTarget = null;
       hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
@@ -2069,6 +2538,7 @@
       const sha = commitRow.dataset.commitSha;
       state.selectedCommit = state.selectedCommit === sha ? '' : sha;
       state.activeCommentDraft = null;
+      state.highlightedTarget = null;
       hideSelectionQuotePill();
       state.gapExpansions.clear();
       await loadDiffForSelected({ silent: false });
@@ -2193,8 +2663,40 @@
     await refreshAll({ silent });
   }
 
+  function consumeUrlDeepLinkParams() {
+    const parsed = parseDeepLinkFromSearch(
+      window.location.search,
+      window.location.hash
+    );
+    if (!parsed) return;
+    state.pendingDeepLink = parsed;
+
+    try {
+      const nextUrl = new URL(window.location.href);
+      for (const k of [
+        'repo',
+        'path',
+        'root',
+        'rev',
+        'mode',
+        'commit',
+        'file',
+        'lines',
+        'line',
+        'auto_open',
+      ]) {
+        nextUrl.searchParams.delete(k);
+      }
+      nextUrl.hash = '';
+      window.history.replaceState(null, '', nextUrl.toString());
+    } catch {
+      // Ignore history replace errors
+    }
+  }
+
   async function init() {
     state.conversationId = resolveConversationId();
+    consumeUrlDeepLinkParams();
     lastRefreshAt = Date.now();
     await refreshAll({ silent: false });
 

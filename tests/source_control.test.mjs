@@ -15,10 +15,14 @@ import { join } from 'node:path';
 import {
   commitRepositoryChanges,
   discardChanges,
+  formatDiffAnchorLink,
+  getLogicalDiffContext,
   getRepositoryDiff,
   getRepositoryFileLines,
   inspectGitRepository,
   parseCommitGpgStatus,
+  parseDiffAnchorUri,
+  parseDiffLineRange,
   parsePorcelainZStatus,
   resolveScopedGitPath,
   stageChanges,
@@ -471,6 +475,136 @@ test('parseCommitGpgStatus classifies verified, unverified, and unsigned commits
   const unsigned = parseCommitGpgStatus('N', '', '');
   assert.equal(unsigned.gpgVerified, false);
   assert.equal(unsigned.gpgSigned, false);
+});
+
+test('parseDiffLineRange, parseDiffAnchorUri, formatDiffAnchorLink, and git_diff_context resolve logical diff anchors', async () => {
+  // 1. Line range parsing (including unencoded '+' converted to space in URL query strings)
+  assert.deepEqual(parseDiffLineRange('L39'), {
+    side: 'new',
+    startLine: 39,
+    endLine: 39,
+    urlParam: 'L39',
+    displayLabel: '+L39',
+  });
+  assert.deepEqual(parseDiffLineRange(' L36-L42'), {
+    side: 'new',
+    startLine: 36,
+    endLine: 42,
+    urlParam: 'L36-L42',
+    displayLabel: '+L36-L42',
+  });
+  assert.deepEqual(parseDiffLineRange('-L18-L22'), {
+    side: 'old',
+    startLine: 18,
+    endLine: 22,
+    urlParam: '-L18-L22',
+    displayLabel: '-L18-L22',
+  });
+
+  // 2. Formatting and parsing sidecar:// and git-diff:// anchors
+  const formatted = formatDiffAnchorLink({
+    repo: 'sc-demo-feature',
+    rev: 'unstaged',
+    file: 'src/pipeline.js',
+    lines: '+L39',
+  });
+  assert.equal(
+    formatted.sidecarUri,
+    'sidecar://source-control/git_ui/?repo=sc-demo-feature&rev=unstaged&file=src%2Fpipeline.js&lines=L39&auto_open=false'
+  );
+  assert.equal(
+    formatted.markdownPill,
+    '[`src/pipeline.js` (unstaged · +L39)](sidecar://source-control/git_ui/?repo=sc-demo-feature&rev=unstaged&file=src%2Fpipeline.js&lines=L39&auto_open=false)'
+  );
+
+  const parsedSidecar = parseDiffAnchorUri(formatted.markdownPill);
+  assert.equal(parsedSidecar.repo, 'sc-demo-feature');
+  assert.equal(parsedSidecar.rev, 'unstaged');
+  assert.equal(parsedSidecar.mode, 'unstaged');
+  assert.equal(parsedSidecar.file, 'src/pipeline.js');
+  assert.equal(parsedSidecar.lineRange.startLine, 39);
+  assert.equal(parsedSidecar.lineRange.side, 'new');
+
+  const parsedGitDiff = parseDiffAnchorUri(
+    'git-diff://source-control.local/commit-e9f2c97/mcp/git_mcp.mjs#L21-L25'
+  );
+  assert.equal(parsedGitDiff.repo, 'source-control');
+  assert.equal(parsedGitDiff.rev, 'e9f2c97');
+  assert.equal(parsedGitDiff.mode, 'branch');
+  assert.equal(parsedGitDiff.commit, 'e9f2c97');
+  assert.equal(parsedGitDiff.file, 'mcp/git_mcp.mjs');
+  assert.equal(parsedGitDiff.lineRange.startLine, 21);
+  assert.equal(parsedGitDiff.lineRange.endLine, 25);
+
+  // 3. End-to-end getLogicalDiffContext and git_diff_context MCP tool call
+  const tempRoot = mkdtempSync(join(tmpdir(), 'sc-ctx-'));
+  try {
+    const repoDir = join(tempRoot, 'demo-repo');
+    mkdirSync(repoDir, { recursive: true });
+    gitInit(repoDir);
+
+    const initialLines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    writeFileSync(
+      join(repoDir, 'pipeline.js'),
+      initialLines.join('\n') + '\n',
+      'utf-8'
+    );
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'Add pipeline.js'], { cwd: repoDir });
+
+    const modifiedLines = [...initialLines];
+    modifiedLines[24] = 'line 25 modified in unstaged worktree';
+    writeFileSync(
+      join(repoDir, 'pipeline.js'),
+      modifiedLines.join('\n') + '\n',
+      'utf-8'
+    );
+
+    const ctxRes = await getLogicalDiffContext({
+      uri: 'sidecar://source-control/git_ui/?repo=demo-repo&rev=unstaged&file=pipeline.js&lines=L25&auto_open=false',
+      contextLines: 3,
+      trackedRepos: [{ path: repoDir, name: 'demo-repo' }],
+    });
+    assert.equal(ctxRes.ok, true);
+    assert.equal(ctxRes.repositoryPath, repoDir);
+    assert.equal(ctxRes.fileCount, 1);
+    assert.ok(
+      ctxRes.files[0].formattedDiff.includes(
+        '>        25 | +line 25 modified in unstaged worktree'
+      )
+    );
+    assert.ok(ctxRes.surroundingFileWindow);
+    assert.equal(ctxRes.surroundingFileWindow.startLine, 22);
+    assert.equal(ctxRes.surroundingFileWindow.endLine, 28);
+
+    // Also test via MCP handleToolCall('git_diff_context')
+    const mcpRes = await handleToolCall(
+      {
+        name: 'git_diff_context',
+        arguments: {
+          uri: 'git-diff://demo-repo.local/unstaged-worktree/pipeline.js',
+          lines: 'L25',
+          context_lines: 2,
+        },
+        _meta: { 'antigravity.google/conversation_id': 'conv-ctx-1' },
+      },
+      {
+        trajectoryData: {
+          ok: true,
+          metadata: { workspaceUris: [`file://${repoDir}`] },
+          parentReferences: [],
+          steps: [],
+        },
+      }
+    );
+    assert.equal(mcpRes.isError, false);
+    const mcpPayload = JSON.parse(mcpRes.content[0].text);
+    assert.equal(mcpPayload.ok, true);
+    assert.equal(mcpPayload.file, 'pipeline.js');
+    assert.ok(mcpPayload.markdownPill.includes('sidecar://source-control/git_ui/'));
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 let failed = 0;

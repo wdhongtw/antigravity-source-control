@@ -1,9 +1,10 @@
 /**
  * @fileoverview Stdio MCP Server for `source-control`.
  *
- * Exposes `git_*` tools (`git_register`, `git_unregister`, `git_list`) so the
- * agent can register, unregister, or list Git repositories and worktrees for
- * the active chat session's Source Control panel.
+ * Exposes `git_*` tools (`git_register`, `git_unregister`, `git_list`, `git_diff_context`)
+ * so the agent can register, unregister, or list Git repositories and worktrees
+ * for the active chat session's Source Control panel, and resolve or format
+ * clickable logical diff anchors (`sidecar://source-control/git_ui/?...`).
  *
  * All session state is persisted natively inside the per-conversation
  * Trajectory (`CortexStepMcpTool` / `CORTEX_STEP_TYPE_GENERIC` steps) rather
@@ -11,6 +12,7 @@
  * is forked in the client.
  */
 
+import { getLogicalDiffContext } from '../lib/git_service.mjs';
 import {
   getSessionRepoState,
   normalizeRepoPath,
@@ -18,7 +20,7 @@ import {
 
 const SERVER_INFO = {
   name: 'git',
-  version: '0.1.12',
+  version: '0.1.13',
 };
 
 const TOOLS = [
@@ -82,6 +84,49 @@ const TOOLS = [
       'antigravity/alwaysLoad': true,
     },
   },
+  {
+    name: 'git_diff_context',
+    description:
+      'Resolve a logical diff anchor URI (`sidecar://source-control/git_ui/?...` or `git-diff://<repo>.local/<rev>/<file>`) or explicit repo/rev/file/lines parameters to inspect expanded unified diff hunks, surrounding file lines, the exact raw `git` command, and a clickable `sidecar://source-control/git_ui/?...` Markdown pill.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: {
+          type: 'string',
+          description:
+            'Optional logical diff anchor URI or Markdown pill (`sidecar://source-control/git_ui/?repo=...&rev=...&file=...&lines=...` or `git-diff://<repo>.local/<rev>/<file>`).',
+        },
+        repo: {
+          type: 'string',
+          description:
+            'Optional repository/worktree name, label, or filesystem path (defaults to the URI repo or active session repository).',
+        },
+        rev: {
+          type: 'string',
+          description:
+            'Optional revision or diff mode: "working", "staged", "unstaged", "all", "branch", or a commit SHA (e.g. "e9f2c97").',
+        },
+        file: {
+          type: 'string',
+          description:
+            'Optional repository-relative file path to inspect (e.g. "src/pipeline.js").',
+        },
+        lines: {
+          type: 'string',
+          description:
+            'Optional target line or range on the new side ("L39", "L36-L42", "+L39") or old side ("-L18", "-L18-L22").',
+        },
+        context_lines: {
+          type: 'number',
+          description:
+            'Number of unified diff and file context lines to include around changes (default: 10).',
+        },
+      },
+    },
+    _meta: {
+      'antigravity/alwaysLoad': true,
+    },
+  },
 ];
 
 let useContentLengthFraming = false;
@@ -121,7 +166,10 @@ export async function handleToolCall(params, options = {}) {
     process.env.ANTIGRAVITY_CONVERSATION_ID ||
     '';
 
-  const match = /(?:^|_)(git_(?:register|unregister|list))$/.exec(rawToolName);
+  const match =
+    /(?:^|_)(git_(?:register|unregister|list|diff_context))$/.exec(
+      rawToolName
+    );
   const toolName = match ? match[1] : rawToolName;
 
   if (toolName === 'git_register' || toolName === 'git_unregister') {
@@ -176,6 +224,18 @@ export async function handleToolCall(params, options = {}) {
     };
     return {
       isError: false,
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    };
+  }
+
+  if (toolName === 'git_diff_context') {
+    const state = await getSessionRepoState(conversationId, null, options);
+    const payload = await getLogicalDiffContext({
+      ...args,
+      trackedRepos: state.repositories,
+    });
+    return {
+      isError: !payload.ok,
       content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
     };
   }
