@@ -13,7 +13,7 @@ Use the `source-control` plugin's MCP tools (`git_register`, `git_unregister`,
 `git_list`, `git_diff_context`) and AuxPane UI
 (`sidecar://source-control/git_ui/`) to track session repositories/worktrees,
 cite clickable logical diffs in conversations and Markdown artifacts, and
-inspect expanded diff context.
+respond to inline diff review comments.
 
 ## 1. Session Repository & Worktree Tracking (`git_register`, `git_unregister`, `git_list`)
 
@@ -51,26 +51,43 @@ Or for a specific commit:
 
 ### Query Parameters
 
-| Parameter   | Values / Format                                                            | Description                                                                                                                                          |
-| :---------- | :------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repo`      | `<repo-name>` or `<path>`                                                  | Matches a tracked session repository/worktree by directory basename (`sc-demo-feature`), label, or path.                                             |
-| `rev`       | `working` \| `staged` \| `unstaged` \| `all` \| `branch` \| `<commit-sha>` | Selects the diff mode, or switches to **Commits** mode focused on `<commit-sha>` (also accepts `commit-<sha>` or separate `mode` + `commit` params). |
-| `file`      | `<relative/path/to/file>`                                                  | Repository-relative file path.                                                                                                                       |
-| `lines`     | `L39`, `L36-L42`, `+L39`, `-L18`, `-L18-L22`                               | Target line or range on the new side (`L39` / `+L39`) or old side (`-L18`).                                                                          |
-| `auto_open` | `false`                                                                    | Keeps the AuxPane from auto-opening while a response streams or when opening a report; opens only when clicked.                                      |
+- - Parameter: `repo`
+  - Values / Format: `<repo-name>` or `<path>`
+  - Description: Matches a tracked session repository/worktree by directory
+    basename (`sc-demo-feature`), label, or path.
+- - Parameter: `rev`
+  - Values / Format: `working`, `staged`, `unstaged`, `all`, `branch`, or
+    `<commit-sha>`
+  - Description: Selects the diff mode, or switches to **Commits** mode focused
+    on `<commit-sha>` (also accepts `commit:<sha>`, `commit-<sha>`, or separate
+    `mode` + `commit` parameters).
+- - Parameter: `file`
+  - Values / Format: `<relative/path/to/file>`
+  - Description: Repository-relative file path.
+- - Parameter: `lines`
+  - Values / Format: `L39`, `L36-L42`, `+L39`, `-L18`, `-L18-L22`
+  - Description: Target line or range on the new side (`L39` / `+L39`) or old
+    side (`-L18`).
+- - Parameter: `auto_open`
+  - Values / Format: `false`
+  - Description: Keeps the AuxPane from auto-opening while a response streams or
+    when opening a report; opens only when clicked.
 
-## 3. Inspecting More Context from a Logical Diff Anchor (`git_diff_context`)
+## 3. Inspecting Diff Context & Handling Inline Diff Review Comments (`git_diff_context`)
 
-When a conversation message, report, or inline diff review message submitted
-from the Source Control panel references a logical diff anchor
-(`sidecar://source-control/git_ui/?...` or
-`git-diff://<repo>.local/<rev>/<file>`), you can inspect surrounding diff hunks
-and file context in two ways:
+Users can select single or multi-line ranges directly inside the Source Control
+diff viewer and send either a single comment (`### Diff Review Comment`) or a
+batched multi-comment review (`### Diff Review`) to the conversation. Each
+review item includes a clickable `sidecar://source-control/git_ui/?...` pill, a
+fenced `diff` block with `>` markers on the selected lines, and the user's
+comment.
+
+To inspect broader context around any logical diff anchor:
 
 1. **Via the `git_diff_context` MCP tool**:
    - Pass `uri` directly (accepts `sidecar://source-control/git_ui/?...` links,
      Markdown pills `[label](sidecar://...)`, or
-     `git-diff://<repo>.local/<rev>/<file>` review URIs), or pass explicit
+     `git-diff://<repo>.local/<rev>/<file>` URIs), or pass explicit
      `{ repo, rev, file, lines, context_lines }` parameters.
    - `git_diff_context` resolves the repository path, runs `git diff` /
      `git show` with `-U<context_lines>` (default `10`), and returns:

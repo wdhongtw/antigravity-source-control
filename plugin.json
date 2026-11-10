@@ -1,8 +1,8 @@
 {
   "name": "source-control",
   "displayName": "Source Control",
-  "description": "IDE-style Git source control, worktree inspector, staging and commit workflow, and live unified diff viewer tracked via per-chat session metadata.",
-  "version": "0.1.15",
+  "description": "IDE-style Git source control, worktree inspector, staging and commit workflow, clickable logical diff citations, and inline diff review commenting.",
+  "version": "0.1.16",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Register a Git repository or worktree in Source Control",

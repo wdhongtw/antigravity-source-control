@@ -20,7 +20,7 @@ import {
 
 const SERVER_INFO = {
   name: 'git',
-  version: '0.1.13',
+  version: '0.1.16',
 };
 
 const TOOLS = [
