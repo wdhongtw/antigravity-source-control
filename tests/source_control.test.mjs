@@ -715,6 +715,40 @@ test('formatDiffReviewMessage and sendConversationMessage synthesize and dispatc
   ]);
 });
 
+test('plugin manifests, rule frontmatter, skill frontmatter, and MCP eager tools are valid and aligned', () => {
+  const repoRoot = join(import.meta.dirname, '..');
+  const pluginJson = JSON.parse(
+    readFileSync(join(repoRoot, 'plugin.json'), 'utf-8')
+  );
+  assert.equal(pluginJson.name, 'source-control');
+  assert.ok(pluginJson.version);
+  assert.equal(pluginJson.logo, 'assets/logo.svg');
+  assert.ok(existsSync(join(repoRoot, pluginJson.logo)));
+
+  const mcpConfig = JSON.parse(
+    readFileSync(join(repoRoot, 'mcp_config.json'), 'utf-8')
+  );
+  const eagerTools = Object.keys(mcpConfig.mcpServers?.git?.tools || {});
+  assert.deepEqual(eagerTools, [
+    'git_register',
+    'git_unregister',
+    'git_list',
+    'git_diff_context',
+  ]);
+
+  const ruleText = readFileSync(
+    join(repoRoot, 'rules', 'git-tracking.md'),
+    'utf-8'
+  );
+  assert.match(ruleText, /^---\n[\s\S]*?trigger:\s*always_on[\s\S]*?\n---\n/);
+
+  const skillText = readFileSync(
+    join(repoRoot, 'skills', 'source-control', 'SKILL.md'),
+    'utf-8'
+  );
+  assert.match(skillText, /^---\nname:\s*source-control\ndescription:/);
+});
+
 let failed = 0;
 for (const t of tests) {
   try {
